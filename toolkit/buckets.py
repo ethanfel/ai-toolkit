@@ -54,11 +54,14 @@ resolutions_1024: List[BucketResolution] = [
     # extra wides
     {"width": 8192, "height": 128},
     {"width": 128, "height": 8192},
+    #QIE
+    {"width": 832, "height": 1216},
+    {"width": 1216, "height": 832},
 ]
 
 def get_bucket_sizes(resolution: int = 512, divisibility: int = 8) -> List[BucketResolution]:
     # determine scaler form 1024 to resolution
-    scaler = resolution / 1024
+    scaler = 1
 
     bucket_size_list = []
     for bucket in resolutions_1024:
