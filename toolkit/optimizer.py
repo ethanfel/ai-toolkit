@@ -39,6 +39,32 @@ def get_optimizer(
         # let net be the neural network you want to train
         # you can choose weight decay value based on your problem, 0 by default
         optimizer = Prodigy8bit(params, lr=use_lr, eps=1e-6, **optimizer_params)
+    elif lower_type in ["prodigy_plus", "prodigyplus", "prodigy_plus_schedulefree",
+                        "prodigyplusschedulefree", "prodigy+"]:
+        from prodigyplus.prodigy_plus_schedulefree import ProdigyPlusScheduleFree
+
+        print("Using Prodigy+ Schedule-Free optimizer")
+        use_lr = learning_rate
+        if use_lr < 0.1:
+            # prodigy uses a relative lr; 1.0 is the expected value
+            use_lr = 1.0
+        print(f"Using lr {use_lr}")
+
+        # validated defaults (from the HunyuanVideo-Foley recipe); every one of
+        # these is overridable via optimizer_params in the job config.
+        pp_defaults = {
+            'betas': [0.9, 0.999],
+            'weight_decay': 0.01,
+            'd_coef': 1.0,
+        }
+        for k, v in pp_defaults.items():
+            optimizer_params.setdefault(k, v)
+
+        optimizer = ProdigyPlusScheduleFree(params, lr=use_lr, **optimizer_params)
+        # Schedule-free optimizers must start in train mode. The trainer switches
+        # to eval mode (averaged weights) around sampling/saving and back to train
+        # to continue. See toolkit.optimizer.optimizer_requires_eval_mode.
+        optimizer.train()
     elif lower_type.startswith("prodigy"):
         from prodigyopt import Prodigy
 
@@ -106,3 +132,20 @@ def get_optimizer(
     else:
         raise ValueError(f'Unknown optimizer type {optimizer_type}')
     return optimizer
+
+
+def optimizer_requires_eval_mode(optimizer_type: str) -> bool:
+    """Whether an optimizer needs train()/eval() mode toggling.
+
+    Schedule-free optimizers (e.g. Prodigy+ Schedule-Free) hold the raw
+    train-mode weights during optimization and only materialize the averaged
+    weights when ``optimizer.eval()`` is called. The trainer must switch to eval
+    mode before sampling or saving (so artifacts match inference) and back to
+    train mode afterwards to continue training.
+    """
+    if optimizer_type is None:
+        return False
+    return optimizer_type.lower() in [
+        "prodigy_plus", "prodigyplus", "prodigy_plus_schedulefree",
+        "prodigyplusschedulefree", "prodigy+",
+    ]

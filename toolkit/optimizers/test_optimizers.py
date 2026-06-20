@@ -178,6 +178,7 @@ def main():
     from toolkit.optimizers.automagic3 import Automagic3
     from toolkit.optimizers.adafactor import Adafactor
     from prodigyopt import Prodigy
+    from prodigyplus.prodigy_plus_schedulefree import ProdigyPlusScheduleFree
     import bitsandbytes as bnb
 
     optimizers = [
@@ -189,6 +190,7 @@ def main():
         ("Automagic v3 fused", lambda p: Automagic3(p, lr=1e-4, fused=True)),
         ("Automagic v3 unfused", lambda p: Automagic3(p, lr=1e-4, fused=False)),
         ("Prodigy", lambda p: Prodigy(p, lr=1.0, eps=1e-6)),
+        ("Prodigy+ ScheduleFree", lambda p: ProdigyPlusScheduleFree(p, lr=1.0, weight_decay=0.01)),
     ]
 
     for dtype in DTYPES:

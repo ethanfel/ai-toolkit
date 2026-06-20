@@ -623,6 +623,7 @@ export default function SimpleJob({
                     { value: 'automagic2', label: 'Automagic v2' },
                     { value: 'prodigyopt', label: 'Prodigy' },
                     { value: 'prodigy8bit', label: 'Prodigy8Bit' },
+                    { value: 'prodigy_plus', label: 'Prodigy+ (Schedule-Free)' },
                   ]}
                 />
                 <NumberInput
