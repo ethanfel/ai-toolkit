@@ -37,7 +37,7 @@ from toolkit.lorm import convert_diffusers_unet_to_lorm, count_parameters, print
 from toolkit.lycoris_special import LycorisSpecialNetwork
 from toolkit.models.decorator import Decorator
 from toolkit.network_mixins import Network
-from toolkit.optimizer import get_optimizer
+from toolkit.optimizer import get_optimizer, optimizer_requires_eval_mode
 from toolkit.paths import CONFIG_ROOT
 from toolkit.progress_bar import ToolkitProgressBar
 from toolkit.reference_adapter import ReferenceAdapter
@@ -125,6 +125,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.logging_config = LoggingConfig(**self.get_conf('logging', {}))
         self.logger = create_logger(self.logging_config, config, self.save_root)
         self.optimizer: torch.optim.Optimizer = None
+        # schedule-free optimizers (e.g. Prodigy+) need train()/eval() toggling
+        self._optimizer_is_schedule_free = False
         self.lr_scheduler = None
         self.data_loader: Union[DataLoader, None] = None
         self.data_loader_reg: Union[DataLoader, None] = None
@@ -356,6 +358,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
         # if we have an ema, set it to validation mode
         if self.ema is not None:
             self.ema.eval()
+        # schedule-free optimizers: sample from the averaged (eval) weights
+        self._optimizer_eval()
 
         # let adapter know we are sampling
         if self.adapter is not None and isinstance(self.adapter, CustomAdapter):
@@ -370,6 +374,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
         if self.ema is not None:
             self.ema.train()
+        # restore raw train-mode weights to continue training
+        self._optimizer_train()
 
     def update_training_metadata(self):
         o_dict = OrderedDict({
@@ -488,6 +494,22 @@ class BaseSDTrainProcess(BaseTrainProcess):
     def end_step_hook(self):
         pass
 
+    def _optimizer_eval(self):
+        # Schedule-free optimizers (e.g. Prodigy+) keep the model on the raw
+        # train-mode weights during optimization. Switch to the averaged
+        # eval-mode weights before sampling or saving so the artifact matches
+        # what inference will use. Safe to call repeatedly; no-op otherwise.
+        if self._optimizer_is_schedule_free and self.optimizer is not None:
+            if hasattr(self.optimizer, 'eval') and callable(self.optimizer.eval):
+                self.optimizer.eval()
+
+    def _optimizer_train(self):
+        # Restore the raw train-mode weights so training can continue. Safe to
+        # call repeatedly; no-op for non schedule-free optimizers.
+        if self._optimizer_is_schedule_free and self.optimizer is not None:
+            if hasattr(self.optimizer, 'train') and callable(self.optimizer.train):
+                self.optimizer.train()
+
     def save(self, step=None):
         if not self.accelerator.is_main_process:
             return
@@ -495,6 +517,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
         if self.ema is not None:
             # always save params as ema
             self.ema.eval()
+        # switch schedule-free optimizer to averaged (eval) weights so the saved
+        # checkpoint + optimizer state are consistent for inference and resume
+        self._optimizer_eval()
 
         if not os.path.exists(self.save_root):
             os.makedirs(self.save_root, exist_ok=True)
@@ -704,6 +729,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
         if self.ema is not None:
             self.ema.train()
+        # restore raw train-mode weights to continue training
+        self._optimizer_train()
         flush()
 
     # Called before the model is loaded
@@ -775,6 +802,17 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     param.requires_grad_(True)
 
     def setup_ema(self):
+        if self.train_config.ema_config.use_ema and self._optimizer_is_schedule_free:
+            # Schedule-free optimizers (e.g. Prodigy+) already maintain an
+            # internal running average of the weights and swap to it on .eval().
+            # Layering EMA on top fights that averaging during save/sample, so we
+            # disable EMA here rather than produce inconsistent checkpoints.
+            print_acc(
+                "WARNING: EMA is not compatible with schedule-free optimizers "
+                f"('{self.train_config.optimizer}'), which already average weights "
+                "internally. Disabling EMA for this run."
+            )
+            return
         if self.train_config.ema_config.use_ema:
             # our params are in groups. We need them as a single iterable
             params = []
@@ -2003,7 +2041,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
         optimizer = get_optimizer(self.params, optimizer_type, learning_rate=self.train_config.lr,
                                   optimizer_params=self.train_config.optimizer_params)
         self.optimizer = optimizer
-        
+        self._optimizer_is_schedule_free = optimizer_requires_eval_mode(optimizer_type)
+
         # set it to do paramiter swapping
         if self.train_config.do_paramiter_swapping:
             # only works for adafactor, but it should have thrown an error prior to this otherwise
@@ -2048,6 +2087,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
             # Update the learning rates if they changed
             # optimizer.param_groups = previous_params
 
+        # Ensure schedule-free optimizers are in train mode. On resume this also
+        # reconstructs the raw train-mode weights from the loaded averaged
+        # (eval) weights + optimizer state. No-op for non schedule-free / fresh.
+        self._optimizer_train()
+
         # set up the ema now that the optimizer (and its params) are ready
         self.setup_ema()
 
@@ -2056,6 +2100,14 @@ class BaseSDTrainProcess(BaseTrainProcess):
         # make sure it had bare minimum
         if 'max_iterations' not in lr_scheduler_params:
             lr_scheduler_params['total_iters'] = self.train_config.steps
+
+        if self._optimizer_is_schedule_free and \
+                self.train_config.lr_scheduler not in ['constant', 'constant_with_warmup']:
+            print_acc(
+                f"WARNING: '{self.train_config.optimizer}' is a schedule-free optimizer that "
+                f"manages its own learning rate. lr_scheduler='{self.train_config.lr_scheduler}' "
+                f"may fight the internal schedule; 'constant' is strongly recommended."
+            )
 
         lr_scheduler = get_lr_scheduler(
             self.train_config.lr_scheduler,

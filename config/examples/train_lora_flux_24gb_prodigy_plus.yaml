@@ -1,0 +1,92 @@
+---
+# Example: training a Flux LoRA with the Prodigy+ Schedule-Free optimizer.
+#
+# Prodigy+ auto-tunes the learning rate, so you do NOT manually tune `lr` — leave
+# it at 1.0. It is "schedule-free": it manages its own learning-rate schedule and
+# keeps a running weight average internally, so:
+#   * keep `lr_scheduler: "constant"` (the default) — a decaying scheduler will
+#     fight the internal schedule.
+#   * the trainer automatically switches the optimizer to its averaged weights
+#     when sampling and saving, so your samples and saved LoRA reflect what you
+#     get at inference.
+# See docs/prodigy_plus.md for the full reference.
+job: extension
+config:
+  name: "my_first_flux_lora_prodigy_plus_v1"
+  process:
+    - type: 'sd_trainer'
+      training_folder: "output"
+      device: cuda:0
+#      trigger_word: "p3r5on"
+      network:
+        type: "lora"
+        linear: 16
+        linear_alpha: 16
+      save:
+        dtype: float16
+        save_every: 250
+        max_step_saves_to_keep: 4
+        push_to_hub: false
+      datasets:
+        - folder_path: "/path/to/images/folder"
+          caption_ext: "txt"
+          caption_dropout_rate: 0.05
+          shuffle_tokens: false
+          cache_latents_to_disk: true
+          resolution: [ 512, 768, 1024 ]
+      train:
+        batch_size: 1
+        steps: 2000
+        gradient_accumulation_steps: 1
+        train_unet: true
+        train_text_encoder: false
+        gradient_checkpointing: true
+        noise_scheduler: "flowmatch"
+
+        # --- Prodigy+ Schedule-Free ---
+        optimizer: "prodigy_plus"
+        lr: 1.0                  # prodigy adapts the LR; keep at 1.0
+        lr_scheduler: "constant" # schedule-free: do not decay the LR
+        optimizer_params:
+          # All of these are optional; the values below are the defaults the
+          # trainer applies for prodigy_plus and mirror a validated recipe.
+          weight_decay: 0.01
+          d_coef: 1.0            # scales the adapted step size (try 0.5 - 2.0)
+          # betas: [0.9, 0.999]
+          # --- advanced Prodigy+ knobs (uncomment to use) ---
+          # prodigy_steps: 0     # >0 freezes the adapted LR after N steps
+          # use_cautious: false  # cautious (sign-aligned) updates
+          # schedulefree_c: 0    # schedule-free averaging window (0 = default)
+          # use_orthograd: false # orthogonal-gradient regularization
+
+        # Prodigy+ already keeps an internal weight average, so EMA is redundant
+        # and is auto-disabled for schedule-free optimizers (a warning is logged
+        # if use_ema is true). Keep it off.
+        ema_config:
+          use_ema: false
+          ema_decay: 0.99
+
+        dtype: bf16
+      model:
+        name_or_path: "black-forest-labs/FLUX.1-dev"
+        is_flux: true
+        quantize: true
+      sample:
+        sampler: "flowmatch"
+        sample_every: 250
+        width: 1024
+        height: 1024
+        prompts:
+          - "woman with red hair, playing chess at the park, bomb going off in the background"
+          - "a woman holding a coffee cup, in a beanie, sitting at a cafe"
+          - "a horse is a DJ at a night club, fish eye lens, smoke machine, lazer lights, holding a martini"
+          - "a man showing off his cool new t shirt at the beach, a shark is jumping out of the water in the background"
+          - "a bear building a log cabin in the snow covered mountains"
+        neg: ""
+        seed: 42
+        walk_seed: true
+        guidance_scale: 4
+        sample_steps: 20
+meta:
+  name: "[name]"
+  version: '1.0'
