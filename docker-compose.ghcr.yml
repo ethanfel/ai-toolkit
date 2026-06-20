@@ -1,0 +1,31 @@
+# Drop-in replacement for docker-compose.yml that pulls the fork image
+# (with the Prodigy+ optimizer) from the GitHub Container Registry instead of
+# Docker Hub. Identical runtime interface — only the `image:` line differs.
+#
+# Usage on the remote:
+#   docker login ghcr.io -u ethanfel      # only if the package is private
+#   docker compose -f docker-compose.ghcr.yml pull
+#   docker compose -f docker-compose.ghcr.yml up -d
+services:
+  ai-toolkit:
+    image: ghcr.io/ethanfel/ai-toolkit:latest
+    restart: unless-stopped
+    ports:
+      - "8675:8675"
+    volumes:
+      - ~/.cache/huggingface/hub:/root/.cache/huggingface/hub
+      - ./aitk_db.db:/app/ai-toolkit/aitk_db.db
+      - ./datasets:/app/ai-toolkit/datasets
+      - ./output:/app/ai-toolkit/output
+      - ./config:/app/ai-toolkit/config
+    environment:
+      - AI_TOOLKIT_AUTH=${AI_TOOLKIT_AUTH:-password}
+      - NODE_ENV=production
+      - TZ=UTC
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

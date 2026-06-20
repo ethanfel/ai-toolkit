@@ -1,0 +1,32 @@
+# The Docker build only needs a handful of files from the build context
+# (requirements*.txt, docker/start.sh, ui/package*.json). All application source
+# is cloned from git INSIDE the image (see docker/Dockerfile), so exclude
+# everything heavy/irrelevant to keep the build context tiny.
+.git
+.github
+output
+datasets
+config
+aitk_db.db
+aitk_db.db-journal
+aitk_db.db.old
+*.old
+**/__pycache__
+**/*.pyc
+**/*.safetensors
+**/*.ckpt
+**/*.pt
+**/*.pth
+**/*.onnx
+**/*.mp4
+**/*.wav
+**/*.mp3
+**/*.zip
+**/*.tar
+**/*.7z
+ui/node_modules
+ui/.next
+venv
+.venv
+.idea
+.vscode

@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ---------------------------------------------------------------------------- #
+# Build the ai-toolkit image from this fork and push it to the GitHub Container
+# Registry (ghcr.io). The image is a drop-in replacement for ostris/aitoolkit:
+# same paths (/app/ai-toolkit), same port (8675), same start.sh.
+#
+# The Dockerfile clones the source from the fork at build time, so make sure the
+# branch/commit you want is pushed to GitHub first.
+#
+# Auth: run `docker login ghcr.io -u <user>` once (PAT needs write:packages).
+# ---------------------------------------------------------------------------- #
+
+REGISTRY="ghcr.io"
+OWNER="${OWNER:-ethanfel}"
+IMAGE="${IMAGE:-ai-toolkit}"
+REPO="${REGISTRY}/${OWNER}/${IMAGE}"
+
+# Which fork/branch to bake into the image.
+GIT_REPO="${GIT_REPO:-https://github.com/${OWNER}/ai-toolkit.git}"
+GIT_COMMIT="${GIT_COMMIT:-prodigy}"
+
+if [ -f "version.py" ]; then
+    VERSION=$(python3 -c "from version import VERSION; print(VERSION)")
+else
+    echo "Error: version.py not found."; exit 1
+fi
+VERSION_TAG="${VERSION}-prodigy"
+
+echo "Building ${REPO}"
+echo "  source : ${GIT_REPO} @ ${GIT_COMMIT}"
+echo "  tags   : ${VERSION_TAG}, prodigy, latest"
+sleep 2
+
+docker build \
+    --build-arg CACHEBUST="$(date +%s)" \
+    --build-arg GIT_REPO="${GIT_REPO}" \
+    --build-arg GIT_COMMIT="${GIT_COMMIT}" \
+    -t "${REPO}:${VERSION_TAG}" \
+    -f docker/Dockerfile .
+
+docker tag "${REPO}:${VERSION_TAG}" "${REPO}:prodigy"
+docker tag "${REPO}:${VERSION_TAG}" "${REPO}:latest"
+
+echo "Pushing to ${REGISTRY}..."
+docker push "${REPO}:${VERSION_TAG}"
+docker push "${REPO}:prodigy"
+docker push "${REPO}:latest"
+
+echo "Done:"
+echo "  ${REPO}:${VERSION_TAG}"
+echo "  ${REPO}:prodigy"
+echo "  ${REPO}:latest"
