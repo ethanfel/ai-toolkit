@@ -472,6 +472,17 @@ Confirmed during planning/review (2026-06-23):
 - **⚠️ CRITICAL: `encoder_attention_mask` MUST be `bool`.** Krea2 feeds it directly to SDPA (`int64`→`RuntimeError: Expected attn_mask dtype to be bool or float`). `Krea2Pipeline.get_text_hidden_states` returns the mask via `.bool()`. So in ai-toolkit: store mask as bool in `get_prompt_embeds`, pass bool (NOT qwen's `int64`) in `get_noise_prediction`. The None-fallback `torch.ones(...)` must be `dtype=torch.bool`.
 - **Weights converted via** `scripts/convert_krea2_community_to_diffusers.py` from `/media/p5/models/krea2-base-src` (community repo download).
 
+### ⚠️ HARDWARE REALITY (2026-06-23) — this box is a 32GB RTX 5090, NOT 96GB
+The dev box has a single RTX 5090 (32GB), shared with a long-running ComfyUI server (~27GB held).
+Full bf16 (transformer 25.6GB + TE 8GB = 33.6GB) does NOT fit. Per user decision, **re-added
+quantization/low-VRAM** to `load_model` (qwen-style: `quantize`/`quantize_te`/`low_vram`/
+`layer_offloading`; Qwen3-VL visual tower dropped by default via `_keep_visual=False`). Two example
+configs: `train_lora_krea2_32gb.yaml` (qfloat8 + low_vram) and `train_lora_krea2_96gb.yaml` (full bf16).
+**Phase 4 verified at code level** (packing bit-identical to `Krea2Pipeline._pack_latents`, unpack
+inverts pack, position_ids correct, earlier GPU forward smoke finite). **PENDING (blocked on free
+VRAM): end-to-end image-gen coherence check + 20-step training smoke** — needs ComfyUI idled or the
+96GB box.
+
 ---
 
 ## Notes
