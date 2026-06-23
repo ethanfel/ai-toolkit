@@ -68,7 +68,10 @@ config:
           - "a horse is a DJ at a night club, fish eye lens, smoke machine, lazer lights, holding a martini"
           - "a bear building a log cabin in the snow covered mountains"
           - "photo of a man, white background, medium shot, modeling clothing, studio lighting, white backdrop"
-        neg: ""
+# Krea 2 RAW/Base is undistilled and leans on CFG — sampling it with an empty negative looks
+        # terrible. Give it a real negative prompt (and guidance_scale >= 4). (Final quality is best
+        # judged by loading the trained LoRA on Krea 2 Turbo.)
+        neg: "blurry, low quality, low resolution, distorted, deformed, jpeg artifacts, watermark, text"
         seed: 42
         walk_seed: true
         guidance_scale: 4

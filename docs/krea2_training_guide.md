@@ -169,7 +169,10 @@ meta:
 - **Resolutions must be multiples of 16** (vae_scale_factor 8 × patch 2). 512/768/1024 all qualify.
 - **`guidance_scale`** in `sample` is a *standard* CFG scale; the trainer converts it to Krea 2's
   `cond + (scale−1)·(cond−uncond)` convention internally, so use it like any other model (≈3–5).
-- **Training samples on RAW look rough** — that's normal. Judge quality by loading the LoRA on Turbo.
+- **Training samples on RAW look rough** — that's normal (RAW is undistilled). Two things help a lot:
+  set a real **negative prompt** (`sample.neg: "..."`; an *empty* negative makes RAW samples look
+  terrible because it leans heavily on CFG) and keep `guidance_scale >= 4`. Final quality is still
+  best judged by loading the trained LoRA on Krea 2 **Turbo**.
 - **Captioning a style:** describe what you *don't* want baked in, omit the stylistic parts you *do*
   want learned, and add a descriptive trigger phrase (e.g. `"... hand-drawn children's book illustration"`)
   rather than a rare token. For a subject/character, a trigger word is fine.
