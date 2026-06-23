@@ -284,10 +284,13 @@ def quantize_model(
         # quantize additional layers
         print_acc(" - quantizing additional layers")
         quantization_type = get_qtype('uint8')
+        extra_exclude = []
+        if hasattr(base_model, "get_quantization_exclude_modules"):
+            extra_exclude = base_model.get_quantization_exclude_modules() or []
         quantize(
             model_to_quantize,
             weights=quantization_type,
-            exclude=lora_exclude_modules
+            exclude=lora_exclude_modules + extra_exclude
         )
     else:
         # quantize model the original way without an accuracy recovery adapter
