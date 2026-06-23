@@ -1,5 +1,9 @@
 torchao==0.10.0
 safetensors
+# numba (via librosa) caps numpy; without this pin pip picks numpy 2.x on the py3.12 docker base,
+# then backtracks scikit-image/PyWavelets/etc. into pre-cp312 source builds that fail. Matches the
+# working training env.
+numpy==1.26.4
 git+https://github.com/huggingface/diffusers.git@afd776547022d00e10bc7588831bcd39513bd597
 #pip install git+https://github.com/huggingface/diffusers.git@refs/pull/13432/head
 transformers==5.5.3
