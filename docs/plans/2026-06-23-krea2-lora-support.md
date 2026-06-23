@@ -479,9 +479,21 @@ quantization/low-VRAM** to `load_model` (qwen-style: `quantize`/`quantize_te`/`l
 `layer_offloading`; Qwen3-VL visual tower dropped by default via `_keep_visual=False`). Two example
 configs: `train_lora_krea2_32gb.yaml` (qfloat8 + low_vram) and `train_lora_krea2_96gb.yaml` (full bf16).
 **Phase 4 verified at code level** (packing bit-identical to `Krea2Pipeline._pack_latents`, unpack
-inverts pack, position_ids correct, earlier GPU forward smoke finite). **PENDING (blocked on free
-VRAM): end-to-end image-gen coherence check + 20-step training smoke** — needs ComfyUI idled or the
-96GB box.
+inverts pack, position_ids correct, earlier GPU forward smoke finite).
+
+### ✅ FULL GPU VERIFICATION PASSED (2026-06-23, RTX 5090 32GB, ComfyUI idled)
+- Quantized (qfloat8 transformer + TE, visual dropped) model loads at **17.3GB** on the 32GB card.
+- `get_prompt_embeds(["a cat"])` → `(1, 512, 12, 2560)` bf16 + `(1,512)` bool mask.
+- `get_noise_prediction` finite; packing == `_pack_latents`, position_ids == pipeline.
+- VAE encode/decode round-trips finite.
+- **End-to-end generation produced a coherent red fox** (`output/krea2_smoke.png`) → conversion correct (incl. dropped `up/down`).
+- **Quantization gotcha FIXED:** quanto's matmul only supports 2D/3D activations; `text_fusion.projector` (Linear collapsing the 12-layer axis) takes 4D → excluded via new `get_quantization_exclude_modules()` hook in `quantize_model` + `Krea2Model.get_quantization_exclude_modules()` returning `["text_fusion.projector"]`. Also: inference must use `torch.no_grad()` (else quanto dequant graph blows VRAM; training uses gradient checkpointing).
+
+### ✅ TRAINING SMOKE PASSED (Phase 8) — 20 steps on diffusers/dog-example, qfloat8, low_vram off
+- LoRA created on **224 transformer modules**; latents + text embeds cached, TE unloaded; fits 32GB (~1.5s/it, no OOM).
+- Loss finite (~0.03–0.15). Saved `krea2_smoke.safetensors` (448 keys, `diffusion_model.` prefix).
+- **LoRA round-trips:** all 448 keys map back to 224 real transformer modules via `convert_lora_weights_before_load`.
+- Post-training sample = coherent sks dog in flowers → sampling path (Krea2 guidance) works during training.
 
 ---
 

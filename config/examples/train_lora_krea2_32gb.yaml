@@ -54,7 +54,9 @@ config:
         qtype: "qfloat8"
         quantize_te: true
         qtype_te: "qfloat8"
-        low_vram: true
+        # qfloat8 loads at ~17GB on 32GB, leaving room for training without offload. If you OOM at
+        # high resolution / larger batch, set low_vram: true (slower — streams the transformer).
+        low_vram: false
       sample:
         sampler: "flowmatch"
         sample_every: 250
