@@ -1,0 +1,69 @@
+---
+# Krea 2 (Base / RAW) LoRA training — full bf16 for a large GPU (e.g. RTX 6000 Pro 96GB).
+#
+# WEIGHTS: there is no public diffusers-format Krea 2 repo. Produce a local one first with:
+#   python scripts/convert_krea2_community_to_diffusers.py \
+#       --src /path/to/CalamitousFelicitousness--Krea-2-Base-Diffusers \
+#       --dst /media/p5/models/krea2-base-diffusers
+# then point name_or_path at the --dst directory below.
+#
+# Train on Krea 2 RAW/Base (undistilled — the checkpoint meant for fine-tuning). LoRAs trained on
+# RAW apply cleanly to Krea 2 Turbo for fast inference.
+job: extension
+config:
+  name: "my_first_krea2_lora_v1"
+  process:
+    - type: 'sd_trainer'
+      training_folder: "output"
+      device: cuda:0
+#      trigger_word: "p3r5on"
+      network:
+        type: "lora"
+        linear: 16
+        linear_alpha: 16
+      save:
+        dtype: float16
+        save_every: 250
+        max_step_saves_to_keep: 4
+      datasets:
+        - folder_path: "/path/to/images/folder"
+          caption_ext: "txt"
+          caption_dropout_rate: 0.05
+          shuffle_tokens: false
+          cache_latents_to_disk: true
+          resolution: [ 512, 768, 1024 ]
+      train:
+        batch_size: 1
+        cache_text_embeddings: true
+        steps: 2000
+        gradient_accumulation: 1
+        train_unet: true
+        train_text_encoder: false
+        gradient_checkpointing: true
+        noise_scheduler: "flowmatch"
+        optimizer: "adamw8bit"
+        lr: 1e-4
+        dtype: bf16
+      model:
+        # local diffusers dir produced by scripts/convert_krea2_community_to_diffusers.py
+        name_or_path: "/media/p5/models/krea2-base-diffusers"
+        arch: "krea_2"
+        quantize: false          # 96GB -> full bf16, no quantization required
+      sample:
+        sampler: "flowmatch"
+        sample_every: 250
+        width: 1024
+        height: 1024
+        prompts:
+          - "a woman with red hair, playing chess at the park, bomb going off in the background"
+          - "a horse is a DJ at a night club, fish eye lens, smoke machine, lazer lights, holding a martini"
+          - "a bear building a log cabin in the snow covered mountains"
+          - "photo of a man, white background, medium shot, modeling clothing, studio lighting, white backdrop"
+        neg: ""
+        seed: 42
+        walk_seed: true
+        guidance_scale: 4
+        sample_steps: 25
+meta:
+  name: "[name]"
+  version: '1.0'
