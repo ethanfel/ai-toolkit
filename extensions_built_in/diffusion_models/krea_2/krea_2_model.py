@@ -128,6 +128,13 @@ class Krea2Model(BaseModel):
                 self.device_torch,
                 offload_percent=self.model_config.layer_offloading_transformer_percent,
             )
+            # MemoryManager only streams Linear/Conv *modules* on/off the GPU; it does not manage a
+            # block's direct nn.Parameters. Krea2's per-block (and final) `scale_shift_table` is such
+            # a parameter and is added to the GPU-resident time embedding, so pin these tiny tables on
+            # the compute device to avoid a cuda/cpu device mismatch with the streamed weights.
+            for p_name, p in transformer.named_parameters():
+                if p_name.endswith("scale_shift_table"):
+                    p.data = p.data.to(self.device_torch)
 
         if self.low_vram:
             self.print_and_status_update("Keeping transformer on CPU (low_vram)")
