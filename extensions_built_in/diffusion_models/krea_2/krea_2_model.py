@@ -13,6 +13,9 @@ from toolkit.samplers.custom_flowmatch_sampler import (
     CustomFlowMatchEulerDiscreteScheduler,
 )
 from toolkit.accelerator import unwrap_model
+from optimum.quanto import freeze
+from toolkit.util.quantize import quantize, get_qtype, quantize_model
+from toolkit.memory_management import MemoryManager
 
 from diffusers import (
     Krea2Pipeline,
@@ -55,6 +58,8 @@ class Krea2Model(BaseModel):
     """
 
     arch = "krea_2"
+    # text-only conditioning, so the Qwen3-VL visual tower is dropped by default to save memory
+    _keep_visual = False
 
     def __init__(
         self,
@@ -94,26 +99,77 @@ class Krea2Model(BaseModel):
 
         # Build the whole pipeline via from_pretrained. This is required (unlike qwen's empty-pipe
         # pattern) because Krea2's encode_prompt reads self.pipeline.text_encoder_select_layers, which
-        # is only configured correctly when the pipeline config is loaded. The user runs full bf16 on
-        # a 96 GB card, so there are no quantize / offload / single-file branches.
+        # is only configured correctly when the pipeline config is loaded. Components are loaded on CPU
+        # first, then quantized / offloaded / moved per the model config (12.8B transformer needs
+        # quantization to fit a ~24-32 GB card; full bf16 only fits a big card).
         self.print_and_status_update("Loading pipeline (transformer + text encoder + vae)")
         pipe: Krea2Pipeline = Krea2Pipeline.from_pretrained(model_path, torch_dtype=dtype)
         pipe.scheduler = self.noise_scheduler
+        transformer = pipe.transformer
+        text_encoder = pipe.text_encoder
 
-        self.print_and_status_update("Preparing model")
-        pipe.transformer.to(self.device_torch)
-        pipe.text_encoder.to(self.device_torch, dtype=dtype)
-        pipe.text_encoder.requires_grad_(False)
-        pipe.text_encoder.eval()
+        # drop the Qwen3-VL visual tower; Krea2 conditions on text only and never invokes it
+        if not self._keep_visual and hasattr(text_encoder, "visual"):
+            text_encoder.visual = None
+            flush()
+
+        # ---- transformer: quantize / layer-offload / device placement ----
+        if self.model_config.quantize:
+            self.print_and_status_update("Quantizing transformer")
+            quantize_model(self, transformer)
+            flush()
+
+        if (
+            self.model_config.layer_offloading
+            and self.model_config.layer_offloading_transformer_percent > 0
+        ):
+            MemoryManager.attach(
+                transformer,
+                self.device_torch,
+                offload_percent=self.model_config.layer_offloading_transformer_percent,
+            )
+
+        if self.low_vram:
+            self.print_and_status_update("Keeping transformer on CPU (low_vram)")
+            transformer.to("cpu")
+        else:
+            transformer.to(self.device_torch)
+        flush()
+
+        # ---- text encoder: device, then quantize / layer-offload ----
+        self.print_and_status_update("Preparing text encoder")
+        if (
+            self.model_config.layer_offloading
+            and self.model_config.layer_offloading_text_encoder_percent > 0
+        ):
+            MemoryManager.attach(
+                text_encoder,
+                self.device_torch,
+                offload_percent=self.model_config.layer_offloading_text_encoder_percent,
+            )
+
+        text_encoder.to(self.device_torch, dtype=dtype)
+        if self.model_config.quantize_te:
+            self.print_and_status_update("Quantizing text encoder")
+            quantize(text_encoder, weights=get_qtype(self.model_config.qtype_te))
+            freeze(text_encoder)
+            flush()
+
+        text_encoder.requires_grad_(False)
+        text_encoder.eval()
         pipe.vae.requires_grad_(False)
         pipe.vae.eval()
         flush()
 
+        # reattach (visual-dropped / quantized) components to the pipe
+        pipe.transformer = transformer
+        pipe.text_encoder = text_encoder
+
         # save it to the model class
         self.vae = pipe.vae
-        self.text_encoder = [pipe.text_encoder]  # list of text encoders
+        self.text_encoder = [text_encoder]  # list of text encoders
         self.tokenizer = [pipe.tokenizer]  # list of tokenizers
-        self.model = pipe.transformer
+        self.model = transformer
         self.pipeline = pipe
         self.print_and_status_update("Model Loaded")
 
