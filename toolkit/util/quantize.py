@@ -318,6 +318,11 @@ def quantize_model(
         # todo, on extras find a universal way to quantize them on device and move them back to their original
         # device without having to move the transformer blocks to the device first
         base_model.print_and_status_update(" - quantizing extras")
+        # some models have layers quanto's kernels can't handle (e.g. >3D activations); let the
+        # model name them so they stay unquantized.
+        exclude_modules = []
+        if hasattr(base_model, "get_quantization_exclude_modules"):
+            exclude_modules = base_model.get_quantization_exclude_modules() or []
         # model_to_quantize.to(base_model.device_torch, dtype=base_model.torch_dtype)
-        quantize(model_to_quantize, weights=quantization_type)
+        quantize(model_to_quantize, weights=quantization_type, exclude=exclude_modules)
         freeze(model_to_quantize)

@@ -333,6 +333,12 @@ class Krea2Model(BaseModel):
     def get_transformer_block_names(self) -> Optional[List[str]]:
         return ["transformer_blocks"]
 
+    def get_quantization_exclude_modules(self):
+        # quanto's quantized matmul only supports 2D/3D activations. The text-fusion projector is a
+        # Linear(num_text_layers, 1) applied to a 4D input (B, seq, dim, num_layers) when collapsing
+        # the tapped-layer axis, so it must stay unquantized (it is negligible in size anyway).
+        return ["text_fusion.projector"]
+
     def convert_lora_weights_before_save(self, state_dict):
         new_sd = {}
         for key, value in state_dict.items():
