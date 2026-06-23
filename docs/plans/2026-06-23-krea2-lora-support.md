@@ -436,13 +436,41 @@ Confirmed during planning/review (2026-06-23):
 - **`ModelConfig.extras_name_or_path`** exists (defaults to `name_or_path`). ✅
 - text encoder hidden_size 2560, head_dim 128, GQA (kv heads 8). VAE is `AutoencoderKLQwenImage` (z_dim 16, latents_mean/std present → reuse qwen encode/decode verbatim). ✅
 
-Still to fill in during Phase 0.3 (needs the bumped diffusers + weights on the GPU box):
-- diffusers commit used: `__________`
-- Krea2 transformer loads from conversion repo with NO shape/key errors? `__________`
-- transformer block container module name for LoRA (`get_transformer_block_names`): `__________`
-- vae_scale_factor / final bucket divisibility (default qwen's 32): `__________`
-- `Krea2Pipeline.__call__` arg names for `generate_single_image` (true_cfg_scale? prompt_embeds_mask?): `__________`
-- Qwen3VLModel: any visual tower worth dropping for VRAM? `__________`
+### Phase 0 execution findings (2026-06-23)
+
+- **diffusers commit used:** `afd776547022d00e10bc7588831bcd39513bd597` (main; v0.39.0.dev0). Has `Krea2Transformer2DModel`, `Krea2Pipeline`, `maybe_adjust_dtype_for_device`. Committed in `requirements_base.txt`. Imports + ai-toolkit registry regression all clean.
+- **Krea2 PR refs:** diffusers #14045 (merged: transformer+pipeline), #14046 (open: official LoRA DreamBooth trainer at `examples/dreambooth/train_dreambooth_lora_krea2.py`, branch `krea2-lora`). No conversion script shipped publicly.
+
+- **⚠️ WEIGHT SOURCE CHANGED — Risk #1 hit.** `CalamitousFelicitousness/Krea-2-Base-Diffusers` is MISLABELED: its `transformer/` safetensors use the original krea `mmdit.py` naming (`blocks.0.attn.wq/wk/wv/wo`, `attn.qknorm.{q,k}norm.scale`, `mlp.{gate,up,down}`, `prenorm/postnorm.scale`, `mod.lin`, top-level `first/tproj/tmlp/last/txtfusion/txtmlp`), NOT diffusers (`transformer_blocks.0.attn.to_q/...`, `ff.*`, `norm1/norm2`, `scale_shift_table`, `img_in/txt_in/time_embed/final_layer`). `from_pretrained` would fail (~430 missing/~432 unexpected keys); its `config.json` also uses legacy keys (`features/heads/multiplier/...`). DO NOT use this repo directly.
+  - Official **`krea/Krea-2-Raw`** + **`krea/Krea-2-Turbo`** are gated/private (HTTP 401; user lacks access). NOT used.
+  - **CHOSEN PATH — local conversion (no gated access).** User has access to the public model repo `CalamitousFelicitousness/Krea-2-Base-Diffusers` (sharded, original `blocks.*` naming; vae/text_encoder/tokenizer/scheduler subfolders ARE correct diffusers format) and the HF **bucket** `krea-community/krea-2` (`raw.safetensors` 26.5GB + official `mmdit.py`/`inference.py`/`sampling.py`). Convert the transformer `blocks.*`→`transformer_blocks.*` and assemble a local diffusers model dir at `/media/p5/models/krea2-base-diffusers`. Set `model.name_or_path` to that path.
+
+- **WEIGHT CONVERSION — fully mapped from official `mmdit.py` (bucket) + safetensors headers. Full automated diff: 0 missing, 0 shape-incompatible after reshape, 2 dropped.** Original `SingleStreamDiT` → diffusers `Krea2Transformer2DModel`:
+  - `blocks.N.` → `transformer_blocks.N.`; `attn.{wq,wk,wv,wo}` → `attn.{to_q,to_k,to_v,to_out.0}`; `attn.gate` → `attn.to_gate`; `attn.qknorm.{qnorm,knorm}.scale` → `attn.{norm_q,norm_k}.weight`; `mlp.{gate,up,down}` → `ff.{gate,up,down}`; `prenorm.scale`/`postnorm.scale` → `norm1.weight`/`norm2.weight`; `mod.lin (6*H,)` → `scale_shift_table` **reshaped to (6,H)**.
+  - top-level: `first`→`img_in`; `tmlp.0/2`→`time_embed.linear_1/2`; `tproj.1`→`time_mod_proj`; `txtmlp.0.scale`→`txt_in.norm.weight`, `txtmlp.1/3`→`txt_in.linear_1/2`; `txtfusion.`→`text_fusion.` (its inner blocks reuse the same attn/mlp/norm renames); `last.modulation.lin (2,H)`→`final_layer.scale_shift_table`, `last.norm.scale`→`final_layer.norm.weight`, `last.linear.*`→`final_layer.linear.*`.
+  - **DROPPED (2): `last.up.weight`, `last.down.weight` (H,H).** Original `LastLayer` computes `... + self.up(self.down(x))` (a PURELY LINEAR residual on pre-norm x). diffusers `Krea2FinalLayer` has no such term and it can't be folded into `linear(adaLN(norm(x)))`. **This omission is inherent to the diffusers Krea2 port — the official gated diffusers repo necessarily drops it too**, so the converted model == what official diffusers weights would be. Accept for LoRA training (self-consistent: train + sample + save all via diffusers). Validate via image-gen smoke (Phase 6). Caveat: not bit-identical to krea's own `inference.py`.
+  - config.json: write fresh with diffusers defaults — confirmed correct from shapes (in_channels=64, num_layers=28, num_attention_heads=48, num_key_value_heads=12, intermediate_size=16384, text_intermediate_size=6912, num_text_layers=12, attention_head_dim=128, axes_dims_rope=(32,48,48), rope_theta=1000).
+  - converter: `scripts/convert_krea2_community_to_diffusers.py` (shard-streaming, ≤5GB RAM/shard).
+
+- **Phase 3/4 logic CONFIRMED against official `train_dreambooth_lora_krea2.py`:**
+  - timestep fed to transformer = `timesteps / 1000` (÷ num_train_timesteps). ✅
+  - packing identical to qwen, `p=2`: `view(B,C,H//p,p,W//p,p).permute(0,2,4,1,3,5).reshape(B,(H//p)*(W//p),C*p*p)`. ✅
+  - transformer call kwargs: `hidden_states, encoder_hidden_states, timestep, position_ids=Krea2Pipeline.prepare_position_ids(txt_seq, gh, gw, device), encoder_attention_mask=prompt_embeds_mask`. ✅
+  - `position_ids` is unbatched `(txt+img_seq, 3)`, shared across batch (transformer asserts ndim==2). Resolves open Q#4. ✅
+  - flow-matching noise `(1-σ)x + σ·ε`, loss target `noise - latents`. ✅
+- **transformer block container for LoRA (`get_transformer_block_names`):** `transformer_blocks` (confirmed in `transformer_krea2.py`: `self.transformer_blocks = nn.ModuleList(...)`). ✅
+- **`_no_split_modules`** = `["Krea2TransformerBlock", "Krea2TextFusionBlock", "Krea2FinalLayer"]`. ✅
+- **Official LoRA target modules** (from README_krea2.md; resolves Risk #5): `img_in, final_layer.linear, to_q, to_k, to_v, to_out.0, to_gate, ff.up, ff.down, text_fusion.projector, txt_in.linear_1, txt_in.linear_2, time_embed.linear_1, time_embed.linear_2, time_mod_proj`. (ai-toolkit's `target_lora_modules=["Krea2Transformer2DModel"]` targets all Linears in the class — broader but valid.)
+- **`Krea2Pipeline.__call__` for `generate_single_image`:** uses `prompt`/`negative_prompt` OR `prompt_embeds`+`prompt_embeds_mask`+`negative_prompt_embeds`+`negative_prompt_embeds_mask`; **`guidance_scale`** (NOT `true_cfg_scale`!) with Krea convention `cond + guidance_scale*(cond-uncond)` (≈ usual CFG scale `1+guidance_scale`; consider passing `guidance_scale-1` to match other models' semantics); `height,width,num_inference_steps,latents,generator,callback_on_step_end,max_sequence_length`.
+- **vae_scale_factor:** `2 ** len(vae.temperal_downsample)` = `2**3 = 8` (temperal_downsample=[F,T,T]). **`get_bucket_divisibility()` = vae_scale_factor*patch = 8*2 = 16** (NOT qwen's 32). ✅ CONFIRMED at load.
+- **Qwen3VLModel visual tower:** PRESENT (`has visual: True`, 36 hidden layers). On 96GB keep it (simplest); optional VRAM win by nulling `text_encoder.visual` (Qwen3VLModel attr) — text-only conditioning doesn't use it. Not required.
+
+### ✅ GATE PASSED (2026-06-23) — converted model `/media/p5/models/krea2-base-diffusers`
+- `Krea2Transformer2DModel.from_pretrained` loads clean (12.82B params, NO shape/key errors). config: intermediate_size=16384, num_layers=28, heads=48. `transformer_blocks` = 28 → `get_transformer_block_names()=["transformer_blocks"]`.
+- VAE z_dim=16; TE Qwen3VLModel 36 layers; pipeline select_layers=(2..35), patch_size=2.
+- Transformer forward smoke: in latent (1,16,32,32)→packed (1,256,64) out, finite. position_ids (272,3) unbatched.
+- **⚠️ CRITICAL: `encoder_attention_mask` MUST be `bool`.** Krea2 feeds it directly to SDPA (`int64`→`RuntimeError: Expected attn_mask dtype to be bool or float`). `Krea2Pipeline.get_text_hidden_states` returns the mask via `.bool()`. So in ai-toolkit: store mask as bool in `get_prompt_embeds`, pass bool (NOT qwen's `int64`) in `get_noise_prediction`. The None-fallback `torch.ones(...)` must be `dtype=torch.bool`.
+- **Weights converted via** `scripts/convert_krea2_community_to_diffusers.py` from `/media/p5/models/krea2-base-src` (community repo download).
 
 ---
 
