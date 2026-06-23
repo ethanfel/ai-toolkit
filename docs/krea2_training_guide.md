@@ -21,19 +21,20 @@ There is **no ready-to-use diffusers repo on the Hub** for Krea 2:
 
 So you have two options.
 
-### Option A — Use a hosted, already-converted repo (enables auto-download) ✅ recommended
+### Option A — Use a hosted, already-converted repo (auto-download) ✅ recommended
 
-If a **converted** model is on the Hub, just put its repo id in `name_or_path` and ai-toolkit
-**auto-downloads it** on first run (diffusers `from_pretrained` handles the download + caching):
+A **converted, diffusers-format** Krea 2 Base is hosted at
+[`ethanfel/Krea-2-Base-Diffusers`](https://huggingface.co/ethanfel/Krea-2-Base-Diffusers). Just put
+its repo id in `name_or_path` and ai-toolkit **auto-downloads it** on first run (diffusers
+`from_pretrained` handles the download + caching) — no manual conversion:
 
 ```yaml
 model:
-  name_or_path: "your-hf-username/Krea-2-Base-Diffusers-aitk"   # a CONVERTED repo
+  name_or_path: "ethanfel/Krea-2-Base-Diffusers"   # converted; auto-downloads
   arch: "krea_2"
 ```
 
-To create such a repo, convert once (Option B) and `hf upload` the output folder to your account.
-After that, anyone using your config/branch/Docker image gets auto-download with no manual steps.
+(To host your own, convert once via Option B and `hf upload` the output folder to your account.)
 
 > ⚠️ Do **not** point `name_or_path` at `CalamitousFelicitousness/Krea-2-Base-Diffusers` directly —
 > it will download but fail to load (wrong weight key naming). It must be converted first.

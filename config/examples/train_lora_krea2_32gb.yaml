@@ -46,8 +46,9 @@ config:
         lr: 1e-4
         dtype: bf16
       model:
-        # local diffusers dir produced by scripts/convert_krea2_community_to_diffusers.py
-        name_or_path: "/media/p5/models/krea2-base-diffusers"
+        # auto-downloads (converted, diffusers-format Krea 2 Base). Or use a local dir produced by
+        # scripts/convert_krea2_community_to_diffusers.py.
+        name_or_path: "ethanfel/Krea-2-Base-Diffusers"
         arch: "krea_2"
         # 12.8B transformer -> quantize to fit 32GB. qfloat8 keeps quality high (no ARA needed).
         quantize: true
