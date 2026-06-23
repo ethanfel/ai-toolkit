@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ---------------------------------------------------------------------------- #
+# Build the ai-toolkit image for the `krea2` branch and push it to ghcr.io.
+#
+# The krea2 branch bumps requirements_base.txt to a diffusers commit that has the
+# Krea 2 transformer/pipeline, so this image is kept SEPARATE from main/prodigy
+# (distinct tags, never tags :latest or :prodigy). The Dockerfile clones the
+# source from the fork at build time and runs `pip install -r requirements.txt`,
+# so the new diffusers pin is picked up automatically.
+#
+# Prereqs:
+#   1. Push the krea2 branch first:  git push -u origin krea2
+#      (the Dockerfile clones GIT_COMMIT=krea2 from GitHub at build time).
+#   2. Auth:  docker login ghcr.io -u <user>   (PAT needs write:packages).
+# ---------------------------------------------------------------------------- #
+
+REGISTRY="ghcr.io"
+OWNER="${OWNER:-ethanfel}"
+IMAGE="${IMAGE:-ai-toolkit}"
+REPO="${REGISTRY}/${OWNER}/${IMAGE}"
+
+# Which fork/branch to bake into the image.
+GIT_REPO="${GIT_REPO:-https://github.com/${OWNER}/ai-toolkit.git}"
+GIT_COMMIT="${GIT_COMMIT:-krea2}"
+
+if [ -f "version.py" ]; then
+    VERSION=$(python3 -c "from version import VERSION; print(VERSION)")
+else
+    echo "Error: version.py not found."; exit 1
+fi
+VERSION_TAG="${VERSION}-krea2"
+
+echo "Building ${REPO}"
+echo "  source : ${GIT_REPO} @ ${GIT_COMMIT}"
+echo "  tags   : ${VERSION_TAG}, krea2   (NOT latest/prodigy — kept separate)"
+sleep 2
+
+docker build \
+    --build-arg CACHEBUST="$(date +%s)" \
+    --build-arg GIT_REPO="${GIT_REPO}" \
+    --build-arg GIT_COMMIT="${GIT_COMMIT}" \
+    -t "${REPO}:${VERSION_TAG}" \
+    -f docker/Dockerfile .
+
+docker tag "${REPO}:${VERSION_TAG}" "${REPO}:krea2"
+
+echo "Pushing to ${REGISTRY}..."
+docker push "${REPO}:${VERSION_TAG}"
+docker push "${REPO}:krea2"
+
+echo "Done:"
+echo "  ${REPO}:${VERSION_TAG}"
+echo "  ${REPO}:krea2"
