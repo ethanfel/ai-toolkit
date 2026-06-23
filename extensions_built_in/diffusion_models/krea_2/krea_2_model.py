@@ -293,6 +293,17 @@ class Krea2Model(BaseModel):
         if self.pipeline.text_encoder.device != self.device_torch:
             self.pipeline.text_encoder.to(self.device_torch)
 
+        # ai-toolkit's default sample negative prompt is the bool `False` (SampleConfig.neg), and
+        # base_model.encode_prompt wraps prompts into a list. Krea2's encode_prompt requires str
+        # inputs (it does `template_prefix + prompt`), so coerce bool/None ("no prompt") to "".
+        def _to_text(p):
+            return "" if (p is None or isinstance(p, bool)) else p
+
+        if isinstance(prompt, (list, tuple)):
+            prompt = [_to_text(p) for p in prompt]
+        else:
+            prompt = _to_text(prompt)
+
         prompt_embeds, prompt_embeds_mask = self.pipeline.encode_prompt(
             prompt,
             device=self.device_torch,
