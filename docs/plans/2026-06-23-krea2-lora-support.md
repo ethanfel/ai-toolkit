@@ -10,6 +10,8 @@
 
 **Target weights:** `CalamitousFelicitousness/Krea-2-Base-Diffusers` (diffusers layout: `transformer/`, `vae/`, `text_encoder/`, `tokenizer/`, `scheduler/`).
 
+> **Reviewed 2026-06-23** against ai-toolkit source + diffusers `main` + the Qwen3-VL config. Fixes applied: `load_model` uses `Krea2Pipeline.from_pretrained` (the `text_encoder_select_layers` dependency) and drops quant/offload branches; `ps` hardcoded to 2 (no `patch_size` in Krea2 config); `get_prompt_embeds(self, prompt, control_images=None)`. Confirmed-correct: `timestep/1000`, 4D prompt embeds compatible with `concat_prompt_embeds`, default select-layers fits the 36-layer encoder. See "Resolved facts".
+
 **Python interpreter for all commands:** `/media/p5/miniforge3/envs/ai_toolkit/bin/python` (the repo has no in-repo venv; the base PATH python lacks deps).
 
 ---
@@ -80,7 +82,7 @@ Latent pack/unpack is identical to qwen (patch `p=2`): `view(B,C,H//p,p,W//p,p) 
 
 1. **Config-schema mismatch (HIGH):** The conversion repo's `transformer/config.json` uses old keys (`features`, `heads`, `kvheads`, `layers`, `patch`, `tdim`, `txtdim`, …) while diffusers-main `Krea2Transformer2DModel.__init__` uses `in_channels`, `num_layers`, `attention_head_dim`, `num_attention_heads`, `num_key_value_heads`, `intermediate_size`, `timestep_embed_dim`, `text_hidden_dim`, …. Values map 1:1 and the diffusers **defaults equal the Krea2-Large values**, but `from_pretrained` may error on unknown keys or silently use defaults that mismatch FFN sizes (`multiplier: 4` vs `intermediate_size`/`text_intermediate_size`). **Must verify weights load with no shape errors.** If it fails: pin diffusers to the exact commit the conversion targeted, OR re-convert from the bucket `raw.safetensors` with diffusers' conversion script, OR find/produce a conversion whose config matches diffusers main.
 2. **diffusers bump (HIGH):** Pinned commit `dc8d9032…` lacks `diffusers.utils.torch_utils.maybe_adjust_dtype_for_device` (imported by `transformer_krea2.py`). Must bump diffusers `main`. Bumping risks regressions in other ai-toolkit models — but this is isolated on the `krea2` branch/image, so blast radius is contained. Smoke-test at least flux/qwen_image load after the bump (load-only, no train).
-3. **timestep scale (MED):** qwen passes `timestep/1000`; the Krea2 pipeline passes `timestep` directly. Confirm whether `Krea2Transformer2DModel` expects 0–1 sigma-scaled or 0–1000. Mirror exactly what `pipeline_krea2.py` feeds the transformer.
+3. **timestep scale — RESOLVED:** `pipeline_krea2.py` feeds `timestep = t / scheduler.config.num_train_timesteps` (= t/1000), so `get_noise_prediction` MUST divide by 1000 (same as qwen). No longer an open question.
 4. **position_ids batching (MED):** `prepare_position_ids` builds one `(seq,3)` tensor; confirm whether the transformer wants it unbatched (shared) or per-batch `(B,seq,3)`, and how variable text lengths within a batch are handled (ai-toolkit pads). Mirror the pipeline.
 5. **LoRA target modules (MED):** `target_lora_modules = ["Krea2Transformer2DModel"]` and `get_transformer_block_names()` must match real module names. Inspect `named_modules()` of the loaded transformer; `_no_split_modules = ["Krea2TransformerBlock", "Krea2TextFusionBlock", "Krea2FinalLayer"]`. Confirm the block-list attribute name (likely `transformer_blocks`).
 6. **bucket divisibility (LOW):** qwen returns `16*2`. Krea2 uses the same VAE; confirm `vae_scale_factor` and set `vae_scale_factor * patch_size`. Default to qwen's value, verify against `pipeline_krea2.py` `_unpack_latents`.
@@ -238,26 +240,28 @@ git commit -m "krea2: register Krea2Model arch skeleton"
 
 **Files:** Modify `extensions_built_in/diffusion_models/krea_2/krea_2_model.py`
 
-**Step 1:** Implement `load_model()` by copying qwen_image's `load_model` and applying: transformer → `Krea2Transformer2DModel`, text encoder → `Qwen3VLModel` (no `.model.visual = None` unless Krea2's encoder exposes a visual tower — verify and drop it if present to save VRAM), pipeline → `Krea2Pipeline`. Keep the `quantize`/`low_vram`/`layer_offloading` branches (harmless; user runs full bf16 so they're inert). VAE load + `self.vae/self.text_encoder/self.tokenizer/self.model/self.pipeline` assignment identical to qwen.
+**Step 1:** Implement `load_model()`. **Do NOT copy qwen's "empty pipe + reassign" pattern** — Krea2's `encode_prompt` reads `self.pipeline.text_encoder_select_layers`, which is only set inside `Krea2Pipeline.__init__` (it defaults to `(2,5,8,…,35)`, which is valid because the Qwen3-VL text encoder has 36 hidden layers — confirmed). Building the pipe via `from_pretrained` guarantees that config is correct. Because the user runs **full bf16 on 96 GB, DROP the `quantize`/`quantize_te`/`low_vram`/`layer_offloading` branches and the `from_single_file` path entirely** (this also removes the qwen imports for quanto/MemoryManager/train_tools). Krea2's `Qwen3VLModel` is a base model — there is no `.model.visual` to null out like qwen's `Qwen2_5_VLForConditionalGeneration`; verify before adding any visual-drop (skip it unless `named_modules()` shows a visual tower worth dropping for VRAM).
 
-Key skeleton (abbreviated; fill from qwen template):
+Recommended skeleton (load the whole pipeline once, then expose components):
 ```python
 def load_model(self):
     dtype = self.torch_dtype
     model_path = self.model_config.name_or_path
-    base = self.model_config.extras_name_or_path or model_path
-    transformer = Krea2Transformer2DModel.from_pretrained(model_path, subfolder="transformer", torch_dtype=dtype)
-    tokenizer = Qwen2Tokenizer.from_pretrained(base, subfolder="tokenizer")
-    text_encoder = Qwen3VLModel.from_pretrained(base, subfolder="text_encoder", torch_dtype=dtype)
-    vae = AutoencoderKLQwenImage.from_pretrained(base, subfolder="vae", torch_dtype=dtype)
     self.noise_scheduler = Krea2Model.get_train_scheduler()
-    pipe = Krea2Pipeline(scheduler=self.noise_scheduler, text_encoder=None, tokenizer=tokenizer, vae=vae, transformer=None)
-    pipe.text_encoder = text_encoder; pipe.transformer = transformer
+    # from_pretrained builds Krea2Pipeline with the correct text_encoder_select_layers config
+    pipe: Krea2Pipeline = Krea2Pipeline.from_pretrained(model_path, torch_dtype=dtype)
+    pipe.scheduler = self.noise_scheduler
     pipe.transformer.to(self.device_torch)
-    text_encoder.to(self.device_torch, dtype=dtype); text_encoder.requires_grad_(False); text_encoder.eval()
-    self.vae = vae; self.text_encoder = [text_encoder]; self.tokenizer = [tokenizer]
-    self.model = pipe.transformer; self.pipeline = pipe
+    pipe.text_encoder.to(self.device_torch, dtype=dtype)
+    pipe.text_encoder.requires_grad_(False); pipe.text_encoder.eval()
+    pipe.vae.requires_grad_(False); pipe.vae.eval()
+    self.vae = pipe.vae
+    self.text_encoder = [pipe.text_encoder]
+    self.tokenizer = [pipe.tokenizer]
+    self.model = pipe.transformer
+    self.pipeline = pipe
 ```
+(If a future quantized/low-VRAM variant is needed, re-introduce qwen's reassign pattern but pass `text_encoder_select_layers=pipe.config.text_encoder_select_layers` explicitly.)
 
 **Step 2:** Verify load on the GPU box:
 Run a 1-off: instantiate `Krea2Model` via the trainer config path or a small script that calls `.load_model()` and prints `type(self.model)`, `type(self.vae)`, `type(self.text_encoder[0])`.
@@ -273,7 +277,7 @@ Expected: Krea2Transformer2DModel / AutoencoderKLQwenImage / Qwen3VLModel, no er
 
 **Step 1:** Implement, mirroring qwen but tolerant of Krea2's stacked embeds:
 ```python
-def get_prompt_embeds(self, prompt) -> PromptEmbeds:
+def get_prompt_embeds(self, prompt, control_images=None) -> PromptEmbeds:  # match BaseModel signature
     if self.pipeline.text_encoder.device != self.device_torch:
         self.pipeline.text_encoder.to(self.device_torch)
     prompt_embeds, prompt_embeds_mask = self.pipeline.encode_prompt(
@@ -304,7 +308,7 @@ Expected: text_embeds rank 4 `(1, seq, num_layers, 2560)` (or whatever 0.3 recor
 def get_noise_prediction(self, latent_model_input, timestep, text_embeddings: PromptEmbeds, **kwargs):
     self.model.to(self.device_torch)
     B, C, H, W = latent_model_input.shape
-    ps = 2  # confirm self.transformer.config exposes patch; else hardcode 2
+    ps = 2  # HARDCODE 2 — Krea2Transformer2DModel config has NO patch_size (in_channels=64=16*2*2). Do NOT use self.transformer.config.patch_size (qwen-ism; would AttributeError).
     x = latent_model_input.view(B, C, H//ps, ps, W//ps, ps).permute(0,2,4,1,3,5).reshape(B, (H//ps)*(W//ps), C*ps*ps)
     gh, gw = H//ps, W//ps
     enc = text_embeddings.text_embeds.to(self.device_torch, self.torch_dtype)
@@ -314,7 +318,7 @@ def get_noise_prediction(self, latent_model_input, timestep, text_embeddings: Pr
     noise_pred = self.transformer(
         hidden_states=x.to(self.device_torch, self.torch_dtype).detach(),
         encoder_hidden_states=enc.detach(),
-        timestep=(timestep / 1000).detach(),   # CONFIRM scale vs pipeline in 0.3
+        timestep=(timestep / 1000).detach(),   # CONFIRMED correct: pipeline_krea2 feeds t/num_train_timesteps (=1000)
         position_ids=position_ids,
         encoder_attention_mask=mask.detach(),
         return_dict=False,
@@ -421,15 +425,24 @@ Expected: prints `Krea2Model` (proves arch registered + diffusers krea2 present 
 
 ---
 
-## Resolved facts (fill in during Phase 0.3)
+## Resolved facts
 
+Confirmed during planning/review (2026-06-23):
+- **timestep scale:** `t/1000` (pipeline uses `t / num_train_timesteps`, num_train_timesteps=1000). ✅
+- **prompt_embeds shape:** 4D `(B, seq, num_selected_layers=12, 2560)`; mask `(B, seq)`. Confirmed handled by `concat_prompt_embeds` (pads via `*shape[2:]`, pads mask in lockstep) and `PromptEmbeds`. ✅
+- **text_encoder_select_layers:** defaults to `(2,5,8,…,35)` in `Krea2Pipeline.__init__`; Qwen3-VL text encoder has `num_hidden_layers=36`, so max index 35 is valid. Use `from_pretrained` so this config is set. ✅
+- **patch size:** 2, hardcoded — Krea2 transformer config has NO `patch_size` (`in_channels=64=16*2*2`). ✅
+- **`self.transformer` property** exists on BaseModel (getter+setter). ✅
+- **`ModelConfig.extras_name_or_path`** exists (defaults to `name_or_path`). ✅
+- text encoder hidden_size 2560, head_dim 128, GQA (kv heads 8). VAE is `AutoencoderKLQwenImage` (z_dim 16, latents_mean/std present → reuse qwen encode/decode verbatim). ✅
+
+Still to fill in during Phase 0.3 (needs the bumped diffusers + weights on the GPU box):
 - diffusers commit used: `__________`
-- Krea2 transformer loads from conversion repo cleanly? `__________`
-- timestep scale fed to transformer (raw vs /1000): `__________`
-- prompt_embeds shape: `__________`
-- transformer block container module name (for LoRA): `__________`
-- vae_scale_factor / bucket divisibility: `__________`
-- Qwen3VL has a visual tower to drop? `__________`
+- Krea2 transformer loads from conversion repo with NO shape/key errors? `__________`
+- transformer block container module name for LoRA (`get_transformer_block_names`): `__________`
+- vae_scale_factor / final bucket divisibility (default qwen's 32): `__________`
+- `Krea2Pipeline.__call__` arg names for `generate_single_image` (true_cfg_scale? prompt_embeds_mask?): `__________`
+- Qwen3VLModel: any visual tower worth dropping for VRAM? `__________`
 
 ---
 
