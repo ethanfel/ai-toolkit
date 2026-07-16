@@ -97,6 +97,14 @@ scheduler_config = {
 QWEN3_VL_PATH = "Qwen/Qwen3-VL-4B-Instruct"
 QWEN_IMAGE_VAE_PATH = "Qwen/Qwen-Image"
 
+# The old fork used a Diffusers-renamed conversion that the upstream native
+# SingleStreamDiT cannot load. Detect the known source so an old job cannot
+# silently resume incompatible LoRA/output state against a different base model.
+LEGACY_DIFFUSERS_SOURCES = {
+    "ethanfel/Krea-2-Base-Diffusers",
+    "CalamitousFelicitousness/Krea-2-Base-Diffusers",
+}
+
 HF_TOKEN = os.getenv("HF_TOKEN", None)
 
 
@@ -128,9 +136,23 @@ def _load_mmdit_state_dict(name_or_path: str, filename: Optional[str]) -> dict:
     """Load the MMDiT weights from a local safetensors file/dir or the HF hub.
 
     ``name_or_path`` may be: a ``.safetensors`` file, a directory containing one
-    (``filename`` or the lone ``.safetensors`` in it), or a hub repo id (the
-    file ``filename`` is downloaded, defaulting to ``model.safetensors``).
+    (``filename`` or the lone ``.safetensors`` in it), or a hub repo id. Hub
+    filenames default from the repository suffix (Raw -> ``raw.safetensors``,
+    Turbo -> ``turbo.safetensors``).
     """
+    is_legacy_diffusers_dir = os.path.isdir(name_or_path) and (
+        os.path.isfile(os.path.join(name_or_path, "model_index.json"))
+        or os.path.isdir(os.path.join(name_or_path, "transformer"))
+    )
+    if name_or_path in LEGACY_DIFFUSERS_SOURCES or is_legacy_diffusers_dir:
+        raise ValueError(
+            f"Krea2 checkpoint {name_or_path!r} uses this fork's legacy Diffusers "
+            "layout, which is incompatible with upstream's native Krea2 model. "
+            "Create a new job/output name with arch='krea2' and "
+            "name_or_path='krea/Krea-2-Raw'. Do not auto-resume an old LoRA; its "
+            "module keys require a separate conversion."
+        )
+
     if name_or_path.endswith(".safetensors") and os.path.isfile(name_or_path):
         return load_file(name_or_path)
 
@@ -165,6 +187,8 @@ def _load_mmdit_state_dict(name_or_path: str, filename: Optional[str]) -> dict:
 
 class Krea2Model(BaseModel):
     arch = "krea2"
+    # Compatibility with configs created by this fork's original Krea2 branch.
+    arch_aliases = ("krea_2",)
 
     def __init__(
         self,
@@ -175,6 +199,13 @@ class Krea2Model(BaseModel):
         noise_scheduler=None,
         **kwargs,
     ):
+        if model_config.arch in self.arch_aliases:
+            raise ValueError(
+                "arch='krea_2' identifies this fork's incompatible legacy Krea2 "
+                "implementation. Copy the job to a new output name, then set "
+                "arch='krea2' and name_or_path='krea/Krea-2-Raw'. Do not "
+                "auto-resume the old LoRA."
+            )
         super().__init__(
             device, model_config, dtype, custom_pipeline, noise_scheduler, **kwargs
         )

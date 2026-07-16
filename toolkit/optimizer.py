@@ -1,6 +1,36 @@
 import torch
 
 
+PRODIGY_PLUS_ALIASES = {
+    "prodigy_plus",
+    "prodigyplus",
+    "prodigy_plus_schedulefree",
+    "prodigyplusschedulefree",
+    "prodigy+",
+}
+
+
+def _normalize_prodigy_plus_group_lrs(params, use_lr):
+    """Keep explicit parameter-group LRs from defeating Prodigy's relative LR.
+
+    ai-toolkit adds ``lr`` to its optimizer parameter groups. PyTorch gives that
+    group value precedence over the optimizer-level default, so merely changing
+    ``learning_rate`` to 1.0 is not enough when a UI config still contains an
+    Adam-style value such as 1e-4.
+    """
+    normalized = 0
+    if isinstance(params, (list, tuple)):
+        for group in params:
+            if not isinstance(group, dict) or "lr" not in group:
+                continue
+            # Preserve exactly 0 for a deliberately frozen group. Small positive
+            # values are Adam-style rates, not useful Prodigy multipliers.
+            if 0 < float(group["lr"]) < 0.1:
+                group["lr"] = use_lr
+                normalized += 1
+    return normalized
+
+
 def get_optimizer(
         params,
         optimizer_type='adam',
@@ -39,8 +69,7 @@ def get_optimizer(
         # let net be the neural network you want to train
         # you can choose weight decay value based on your problem, 0 by default
         optimizer = Prodigy8bit(params, lr=use_lr, eps=1e-6, **optimizer_params)
-    elif lower_type in ["prodigy_plus", "prodigyplus", "prodigy_plus_schedulefree",
-                        "prodigyplusschedulefree", "prodigy+"]:
+    elif lower_type in PRODIGY_PLUS_ALIASES:
         from prodigyplus.prodigy_plus_schedulefree import ProdigyPlusScheduleFree
 
         print("Using Prodigy+ Schedule-Free optimizer")
@@ -48,6 +77,12 @@ def get_optimizer(
         if use_lr < 0.1:
             # prodigy uses a relative lr; 1.0 is the expected value
             use_lr = 1.0
+        normalized_groups = _normalize_prodigy_plus_group_lrs(params, use_lr)
+        if normalized_groups:
+            print(
+                "WARNING: Prodigy+ requires a relative lr near 1.0; normalized "
+                f"{normalized_groups} parameter group(s) to lr={use_lr}."
+            )
         print(f"Using lr {use_lr}")
 
         # validated defaults (from the HunyuanVideo-Foley recipe); every one of
@@ -145,7 +180,4 @@ def optimizer_requires_eval_mode(optimizer_type: str) -> bool:
     """
     if optimizer_type is None:
         return False
-    return optimizer_type.lower() in [
-        "prodigy_plus", "prodigyplus", "prodigy_plus_schedulefree",
-        "prodigyplusschedulefree", "prodigy+",
-    ]
+    return optimizer_type.lower() in PRODIGY_PLUS_ALIASES

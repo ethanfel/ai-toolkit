@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REGISTRY="ghcr.io"
+OWNER="${OWNER:-ethanfel}"
+IMAGE="${IMAGE:-ai-toolkit}"
+REPO="${REGISTRY}/${OWNER}/${IMAGE}"
+GIT_REPO="${GIT_REPO:-https://github.com/${OWNER}/ai-toolkit.git}"
+LOCAL_COMMIT=$(git rev-parse HEAD)
+GIT_COMMIT="${GIT_COMMIT:-${LOCAL_COMMIT}}"
+
+if [ "${GIT_COMMIT}" != "${LOCAL_COMMIT}" ]; then
+    echo "Error: GIT_COMMIT must match the checked-out commit (${LOCAL_COMMIT})."
+    echo "The Docker dependency layers come from this checkout."
+    exit 1
+fi
+
+if ! git diff --quiet HEAD -- \
+    requirements.txt requirements_base.txt \
+    ui/package.json ui/package-lock.json \
+    docker/Dockerfile docker/start.sh; then
+    echo "Error: Docker inputs have uncommitted changes. Commit or stash them first."
+    exit 1
+fi
+
+if [ ! -f version.py ]; then
+    echo "Error: version.py not found."
+    exit 1
+fi
+VERSION=$(python3 -c "from version import VERSION; print(VERSION)")
+VERSION_TAG="${VERSION}-krea2-upstream"
+
+echo "Building ${REPO}"
+echo "  source: ${GIT_REPO} @ ${GIT_COMMIT}"
+echo "  tags:   ${VERSION_TAG}, krea2-upstream"
+echo "The exact commit must already be pushed to ${GIT_REPO}."
+
+docker build \
+    --network=host \
+    --build-arg CACHEBUST="$(date +%s)" \
+    --build-arg GIT_REPO="${GIT_REPO}" \
+    --build-arg GIT_COMMIT="${GIT_COMMIT}" \
+    -t "${REPO}:${VERSION_TAG}" \
+    -f docker/Dockerfile .
+
+docker tag "${REPO}:${VERSION_TAG}" "${REPO}:krea2-upstream"
+docker push "${REPO}:${VERSION_TAG}"
+docker push "${REPO}:krea2-upstream"
+
+echo "Pushed ${REPO}:${VERSION_TAG} and ${REPO}:krea2-upstream"

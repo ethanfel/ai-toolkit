@@ -25,8 +25,9 @@ Accepted config aliases (all map to the same branch): `prodigy_plus`,
    propagated to every parameter group, and Prodigy treats a per-group `lr` as a
    *multiplier* on its adapted step. Setting `lr: 1e-4` (e.g. copied from an
    AdamW config) silently scales the effective LR down by 1e‑4 and training
-   barely moves. Always use `lr: 1.0`. Tune `optimizer_params.d_coef`
-   (`0.5`–`2.0`) instead, never `lr`.
+   barely moves. Always use `lr: 1.0`. The UI sets it automatically, and the
+   backend normalizes stale Adam-style parameter-group values from older jobs.
+   Tune `optimizer_params.d_coef` (`0.5`–`2.0`) instead, never `lr`.
 2. **`lr_scheduler: "constant"`.** Prodigy+ is schedule-free; a decaying
    scheduler (`cosine`, `linear`, …) fights its internal schedule. The trainer
    prints a warning if `prodigy_plus` is paired with a non-constant scheduler.
@@ -94,33 +95,28 @@ round-trips `p.data` exactly), so periodic sampling/saving does not perturb
 training. `accelerate` wraps the optimizer in `AcceleratedOptimizer`, which
 forwards `.train()`/`.eval()`, so the toggles work after `accelerator.prepare`.
 
-## 6. Where it is wired (file:line)
+## 6. Where it is wired
 
 `toolkit/optimizer.py`
-- `get_optimizer()` — `prodigy_plus` branch at **line 42** (placed *before* the
-  generic `startswith("prodigy")` branch at line 68 so it isn't shadowed). Calls
-  `optimizer.train()` after construction (line 67).
-- `optimizer_requires_eval_mode(optimizer_type)` — **line 137**. Single source of
-  truth for "does this optimizer need eval/train toggling".
+- `get_optimizer()` — the `prodigy_plus` branch is placed before the generic
+  `startswith("prodigy")` branch so it is not shadowed. It normalizes stale
+  parameter-group LRs and calls `optimizer.train()` after construction.
+- `optimizer_requires_eval_mode(optimizer_type)` is the single source of truth
+  for whether an optimizer needs eval/train toggling.
 
 `jobs/process/BaseSDTrainProcess.py`
-- `self._optimizer_is_schedule_free` — `__init__` default `False`; assigned from
-  `optimizer_requires_eval_mode()` at **line 2023**.
-- `_optimizer_eval()` / `_optimizer_train()` helpers — **lines 497 / 506**
-  (guarded by the flag + a `hasattr` check; no-ops otherwise).
-- `sample()` hooks — eval at **line 362**, train at **line 378**.
-- `save()` hooks — eval at **line 522**, train at **line 725**.
-- Resume `.train()` reconstruction — **line 2072**.
-- Non-constant-scheduler warning — **line ~2086**.
-- EMA auto-disable — `setup_ema()`, **line ~797**.
-- LR display: the loop shows `param_groups[0]["d"] * param_groups[0]["lr"]` for
-  any optimizer whose name `startswith('prodigy')` (**line ~2507**) — already
-  covers `prodigy_plus`.
+- `self._optimizer_is_schedule_free` tracks the lifecycle requirement.
+- `_optimizer_eval()` / `_optimizer_train()` guard the mode transitions.
+- Sampling and saving switch to averaged weights, then restore train weights.
+- Resume calls `.train()` after loading optimizer state.
+- `setup_ema()` disables a second EMA, and scheduler setup warns when the
+  configured scheduler is not constant.
 
-`ui/src/app/jobs/new/SimpleJob.tsx` — optimizer dropdown option
-`{ value: 'prodigy_plus', label: 'Prodigy+ (Schedule-Free)' }`.
+`ui/src/app/jobs/new/SimpleJob.tsx` — the optimizer dropdown includes Prodigy+
+and selects `lr=1.0`, `weight_decay=0.01`, and `use_ema=false` with it.
 
-Dependency: `prodigy-plus-schedule-free` in `requirements_base.txt`.
+Dependency: tested `prodigy-plus-schedule-free==2.0.1` in
+`requirements_base.txt`.
 
 ## 7. Edge cases / behavior notes
 
@@ -131,10 +127,14 @@ Dependency: `prodigy-plus-schedule-free` in `requirements_base.txt`.
 - **Multi-GPU**: only the main process saves/samples and therefore toggles
   eval/train; the toggle is balanced within `save()`/`sample()` with no training
   step in between, so all ranks are in train mode before the next step.
-- **`lr` log line**: `get_optimizer` prints `Using lr 1.0` for the optimizer-level
-  default; the effective per-group LR still comes from the config `lr` (rule 1).
+- **Stale UI jobs**: if an older job supplies an Adam-style per-group LR below
+  `0.1`, the backend raises it to the Prodigy+ relative LR and prints a warning.
 - **bf16**: `ProdigyPlusScheduleFree` uses stochastic rounding by default, making
   bf16 runs slightly non-deterministic (expected, beneficial).
+- **Trainer scope**: the schedule-free save/sample/resume lifecycle is wired in
+  `BaseSDTrainProcess` (`sd_trainer`, including Krea2). Specialized VAE, ESRGAN,
+  and critic training processes should not select Prodigy+ until they gain the
+  same lifecycle hooks.
 
 ## 8. Quick agent checklist
 

@@ -1,0 +1,24 @@
+services:
+  ai-toolkit:
+    image: ghcr.io/ethanfel/ai-toolkit:krea2-upstream
+    restart: unless-stopped
+    ports:
+      - "8675:8675"
+    volumes:
+      - ~/.cache/huggingface/hub:/root/.cache/huggingface/hub
+      - ./aitk_db.db:/app/ai-toolkit/aitk_db.db
+      - ./datasets:/app/ai-toolkit/datasets
+      - ./output:/app/ai-toolkit/output
+      - ./config:/app/ai-toolkit/config
+    environment:
+      - AI_TOOLKIT_AUTH=${AI_TOOLKIT_AUTH:-password}
+      - HF_TOKEN=${HF_TOKEN:-}
+      - NODE_ENV=production
+      - TZ=UTC
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

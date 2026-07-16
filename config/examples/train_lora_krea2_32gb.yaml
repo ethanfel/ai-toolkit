@@ -1,0 +1,77 @@
+---
+# Krea 2 Raw LoRA training for a ~32 GB GPU.
+# The native checkpoint, text encoder, and VAE download automatically from the
+# Hugging Face Hub on first use and are reused from the normal HF cache.
+job: extension
+config:
+  name: "my_first_krea2_lora_v1"
+  process:
+    - type: sd_trainer
+      training_folder: "output"
+      device: cuda:0
+      # trigger_word: "p3r5on"
+      network:
+        type: lora
+        linear: 16
+        linear_alpha: 16
+      save:
+        dtype: float16
+        save_every: 250
+        max_step_saves_to_keep: 4
+      datasets:
+        - folder_path: "/path/to/images/folder"
+          caption_ext: txt
+          caption_dropout_rate: 0.05
+          shuffle_tokens: false
+          cache_latents_to_disk: true
+          resolution: [512, 768, 1024]
+      train:
+        batch_size: 1
+        cache_text_embeddings: true
+        steps: 2000
+        gradient_accumulation: 1
+        train_unet: true
+        train_text_encoder: false
+        gradient_checkpointing: true
+        noise_scheduler: flowmatch
+        timestep_type: linear
+
+        # Prodigy+ is schedule-free: keep lr=1, a constant scheduler, and EMA off.
+        optimizer: prodigy_plus
+        lr: 1.0
+        lr_scheduler: constant
+        optimizer_params:
+          weight_decay: 0.01
+          d_coef: 1.0
+        ema_config:
+          use_ema: false
+          ema_decay: 0.99
+        dtype: bf16
+      model:
+        # Public native Krea checkpoint; auto-downloads raw.safetensors.
+        name_or_path: "krea/Krea-2-Raw"
+        arch: krea2
+        quantize: true
+        qtype: qfloat8
+        quantize_te: true
+        qtype_te: qfloat8
+        # Set true for a smaller card or if high-resolution buckets OOM (slower).
+        low_vram: false
+      sample:
+        sampler: flowmatch
+        sample_every: 250
+        width: 1024
+        height: 1024
+        prompts:
+          - "a woman with red hair playing chess in a park, cinematic photograph"
+          - "a horse DJ in a nightclub, fisheye lens, smoke and laser lights"
+          - "a bear building a log cabin in snowy mountains"
+        # Raw relies on CFG; use a meaningful negative prompt for useful previews.
+        neg: "blurry, low quality, distorted, deformed, jpeg artifacts, watermark, text"
+        seed: 42
+        walk_seed: true
+        guidance_scale: 3.5
+        sample_steps: 52
+meta:
+  name: "[name]"
+  version: "1.0"

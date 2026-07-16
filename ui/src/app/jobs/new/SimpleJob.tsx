@@ -621,7 +621,25 @@ export default function SimpleJob({
                 <SelectInput
                   label="Optimizer"
                   value={jobConfig.config.process[0].train.optimizer}
-                  onChange={value => setJobConfig(value, 'config.process[0].train.optimizer')}
+                  onChange={value => {
+                    const previousOptimizer = jobConfig.config.process[0].train.optimizer;
+                    setJobConfig(value, 'config.process[0].train.optimizer');
+                    if (value === 'prodigy_plus') {
+                      // Prodigy+ uses a relative LR and its own weight averaging.
+                      // Reset Adam-style UI defaults that would silently cripple it.
+                      setJobConfig(1.0, 'config.process[0].train.lr');
+                      setJobConfig(0.01, 'config.process[0].train.optimizer_params.weight_decay');
+                      setJobConfig(false, 'config.process[0].train.ema_config.use_ema');
+                    } else if (previousOptimizer === 'prodigy_plus') {
+                      // Do not carry Prodigy's relative LR into Adam-family optimizers.
+                      if (jobConfig.config.process[0].train.lr === 1.0) {
+                        setJobConfig(1e-4, 'config.process[0].train.lr');
+                      }
+                      if (jobConfig.config.process[0].train.optimizer_params.weight_decay === 0.01) {
+                        setJobConfig(1e-4, 'config.process[0].train.optimizer_params.weight_decay');
+                      }
+                    }
+                  }}
                   options={[
                     { value: 'adafactor', label: 'Adafactor' },
                     { value: 'adam', label: 'Adam' },

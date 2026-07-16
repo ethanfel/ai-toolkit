@@ -21,7 +21,7 @@ k-diffusion
 open_clip_torch
 timm==1.0.22
 prodigyopt
-prodigy-plus-schedule-free
+prodigy-plus-schedule-free==2.0.1
 controlnet_aux==0.0.10
 python-dotenv
 bitsandbytes

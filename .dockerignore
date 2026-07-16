@@ -1,0 +1,30 @@
+# The image clones application source inside docker/Dockerfile. Keep the build
+# context limited to dependency manifests and Docker/UI build inputs.
+.git
+.github
+output
+datasets
+config
+aitk_db.db
+aitk_db.db-journal
+aitk_db.db.old
+*.old
+**/__pycache__
+**/*.pyc
+**/*.safetensors
+**/*.ckpt
+**/*.pt
+**/*.pth
+**/*.onnx
+**/*.mp4
+**/*.wav
+**/*.mp3
+**/*.zip
+**/*.tar
+**/*.7z
+ui/node_modules
+ui/.next
+venv
+.venv
+.idea
+.vscode

@@ -147,6 +147,31 @@ export const migrateJobConfig = (jobConfig: JobConfig): JobConfig => {
     jobConfig.config.process[0].type = 'diffusion_trainer';
   }
 
+  // Older UI jobs kept Adam's LR when Prodigy+ was selected. Keep the editor
+  // and the backend in agreement about the schedule-free defaults.
+  const train = jobConfig?.config?.process?.[0]?.train;
+  const prodigyPlusAliases = [
+    'prodigy_plus',
+    'prodigyplus',
+    'prodigy_plus_schedulefree',
+    'prodigyplusschedulefree',
+    'prodigy+',
+  ];
+  if (train && prodigyPlusAliases.includes(train.optimizer)) {
+    train.optimizer = 'prodigy_plus';
+    if (train.lr < 0.1) train.lr = 1.0;
+    if (!train.optimizer_params) {
+      train.optimizer_params = { weight_decay: 0.01 };
+    } else if (train.optimizer_params.weight_decay === undefined) {
+      train.optimizer_params.weight_decay = 0.01;
+    }
+    if (!train.ema_config) {
+      train.ema_config = { use_ema: false, ema_decay: 0.99 };
+    } else {
+      train.ema_config.use_ema = false;
+    }
+  }
+
   if ('auto_memory' in jobConfig.config.process[0].model) {
     jobConfig.config.process[0].model.layer_offloading = (jobConfig.config.process[0].model.auto_memory ||
       false) as boolean;

@@ -44,7 +44,10 @@ def get_all_models() -> List[BaseModel]:
 def get_model_class(config: ModelConfig):
     all_models = get_all_models()
     for ModelClass in all_models:
-        if ModelClass.arch == config.arch:
+        aliases = getattr(ModelClass, 'arch_aliases', ()) or ()
+        if isinstance(aliases, str):
+            aliases = (aliases,)
+        if ModelClass.arch == config.arch or config.arch in aliases:
             return ModelClass
     # default to the legacy model
     return StableDiffusion

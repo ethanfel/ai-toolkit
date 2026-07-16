@@ -73,18 +73,23 @@ RUN cd /app/ai-toolkit/ui && npm ci
 # on a code change, so servers only re-pull the (small) source, not the deps.
 # Clone to a temp dir and rsync the source in, preserving the dependency dirs
 # already populated above (ui/node_modules) and the manifests already used.
+# The build context must be the same revision as GIT_REPO/GIT_COMMIT because
+# dependency manifests and start.sh intentionally come from the context.
 # ---------------------------------------------------------------------------- #
 ARG CACHEBUST=1234
+ARG GIT_REPO=https://github.com/ostris/ai-toolkit.git
 ARG GIT_COMMIT=main
 RUN echo "Cache bust: ${CACHEBUST}" && \
-    git clone https://github.com/ostris/ai-toolkit.git /tmp/ai-toolkit-src && \
+    git clone "${GIT_REPO}" /tmp/ai-toolkit-src && \
     cd /tmp/ai-toolkit-src && \
     git checkout ${GIT_COMMIT} && \
     rsync -a --delete \
         --exclude 'ui/node_modules' \
         --exclude 'requirements.txt' \
+        --exclude 'requirements_base.txt' \
         --exclude 'ui/package.json' \
         --exclude 'ui/package-lock.json' \
+        --exclude 'docker/start.sh' \
         /tmp/ai-toolkit-src/ /app/ai-toolkit/ && \
     rm -rf /tmp/ai-toolkit-src
 
