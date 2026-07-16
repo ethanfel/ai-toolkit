@@ -1,0 +1,123 @@
+---
+# Krea 2 Raw image-edit LoRA training for a 96 GB GPU, using Prodigy+.
+#
+# Dataset layout (source and target filenames must have the same stem):
+#   /data/krea2-edit/targets/000001.png
+#   /data/krea2-edit/targets/000001.txt   # source-to-target edit instruction
+#   /data/krea2-edit/sources/000001.png
+#
+# This configuration targets ComfyUI-Krea2Edit's ai_toolkit_t0 reference mode.
+# It intentionally does not load a refusal-reduction or other assistant LoRA.
+# NOTE: exact semantic-conditioning parity also requires the bare vision-block
+# Qwen template patch documented in:
+#   /media/p5/comfyui-krea2edit/docs/KREA2_EDIT_LORA_TRAINING.md
+# Stock AI Toolkit otherwise inserts "Picture N:" before each reference image.
+job: extension
+config:
+  name: "my_krea2_edit_lora_96gb_v1"
+  process:
+    - type: diffusion_trainer
+      training_folder: "output"
+      device: cuda:0
+
+      network:
+        type: lora
+        # Rank 64 is a good starting point for a narrow or related set of edits.
+        # Broad, general-purpose editing may benefit from 128 or higher.
+        linear: 64
+        linear_alpha: 64
+
+      save:
+        dtype: float16
+        save_every: 250
+        max_step_saves_to_keep: 4
+
+      datasets:
+        - # Desired after/target images and their same-stem .txt instructions.
+          folder_path: "/data/krea2-edit/targets"
+          # Matching before/source images. For two references, use a list here;
+          # keep the same reference order at inference.
+          control_path: "/data/krea2-edit/sources"
+          caption_ext: txt
+          caption_dropout_rate: 0.05
+          shuffle_tokens: false
+          full_size_control_images: true
+          cache_latents_to_disk: true
+          # Required for caption dropout to train the empty-instruction branch.
+          cache_text_embeddings: false
+          # Start with 512/768 to validate pairing, then retain 1024 for the run.
+          resolution: [512, 768, 1024]
+
+      train:
+        # Edit training carries target and source tokens simultaneously. Batch 1
+        # remains the safer default even on 96 GB at the 1024 bucket.
+        batch_size: 1
+        steps: 2000
+        gradient_accumulation: 1
+        train_unet: true
+        train_text_encoder: false
+        gradient_checkpointing: true
+        noise_scheduler: flowmatch
+        timestep_type: linear
+
+        # Keep this false: cached embeddings bypass caption dropout and cannot
+        # represent the per-example source image grounding used by edit training.
+        cache_text_embeddings: false
+        unload_text_encoder: false
+
+        # Prodigy+ is schedule-free: lr=1, constant scheduler, and no second EMA.
+        optimizer: prodigy_plus
+        lr: 1.0
+        lr_scheduler: constant
+        optimizer_params:
+          weight_decay: 0.01
+          d_coef: 1.0
+        ema_config:
+          use_ema: false
+
+        dtype: bf16
+
+      model:
+        # Public fine-tuning checkpoint; raw.safetensors auto-downloads from HF.
+        name_or_path: "krea/Krea-2-Raw"
+        arch: krea2
+
+        # Full BF16 model and text encoder for a 96 GB card.
+        quantize: false
+        quantize_te: false
+        low_vram: false
+
+        model_kwargs:
+          # Enables Qwen-grounded source conditioning and clean t=0 reference
+          # latents; without this, the job is an ordinary text-to-image LoRA.
+          edit: true
+          match_target_res: true
+          # ComfyUI-Krea2Edit ai_toolkit_t0 uses full joint attention. Training
+          # with true would produce a different, reference-isolated adapter.
+          kv_cache: false
+          # Stock AI Toolkit Qwen reference-image area budget (384 x 384).
+          vlm_max_pixels: 147456
+
+      sample:
+        sampler: flowmatch
+        sample_every: 250
+        sample_start_step: 0
+        width: 1024
+        height: 1024
+        # Use held-out source images here, not sources from the training pairs.
+        samples:
+          - prompt: "change the jacket to deep red while preserving everything else"
+            ctrl_img_1: "/data/krea2-edit/validation/source_01.png"
+          - prompt: "replace the background with a snowy mountain landscape while preserving the subject"
+            ctrl_img_1: "/data/krea2-edit/validation/source_02.png"
+        # The neutral branch is an empty instruction grounded by the same source.
+        neg: ""
+        seed: 42
+        walk_seed: false
+        guidance_scale: 3.0
+        # Raw quality check. Reduce to 20 for faster smoke-test previews.
+        sample_steps: 52
+
+meta:
+  name: "[name]"
+  version: "1.0"
