@@ -8,10 +8,9 @@
 #
 # This configuration targets ComfyUI-Krea2Edit's ai_toolkit_t0 reference mode.
 # It intentionally does not load a refusal-reduction or other assistant LoRA.
-# NOTE: exact semantic-conditioning parity also requires the bare vision-block
-# Qwen template patch documented in:
-#   /media/p5/comfyui-krea2edit/docs/KREA2_EDIT_LORA_TRAINING.md
-# Stock AI Toolkit otherwise inserts "Picture N:" before each reference image.
+# To continue/train for conradlocke Identity Edit v1.2 instead, enable the
+# identity_edit_v12 lines in model_kwargs below. That opt-in profile switches the
+# complete conditioning contract; do not use it with an ai_toolkit_t0 LoRA.
 job: extension
 config:
   name: "my_krea2_edit_lora_96gb_v1"
@@ -91,6 +90,9 @@ config:
           # Enables Qwen-grounded source conditioning and clean t=0 reference
           # latents; without this, the job is an ordinary text-to-image LoRA.
           edit: true
+          # Identity Edit v1.2 compatibility (leave commented for stock mode):
+          # edit_profile: identity_edit_v12
+          # vlm_longest_side: 768
           match_target_res: true
           # ComfyUI-Krea2Edit ai_toolkit_t0 uses full joint attention. Training
           # with true would produce a different, reference-isolated adapter.

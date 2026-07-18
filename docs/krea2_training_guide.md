@@ -50,6 +50,8 @@ directory. Existing LoRAs need a separate key-conversion step before reuse.
 - `config/examples/train_lora_krea2_32gb.yaml`: qfloat8 transformer/text
   encoder and Prodigy+ for a ~32 GB GPU (`low_vram: true` for smaller cards).
 - `config/examples/train_lora_krea2_96gb.yaml`: full bf16 for a large-memory GPU.
+- `config/examples/train_lora_krea2_edit_96gb.yaml`: image-edit LoRA training
+  with Prodigy+; its comments show both stock and Identity Edit v1.2 profiles.
 
 Edit the dataset path, output name, captions, and samples, then run:
 
@@ -61,6 +63,44 @@ Krea 2 resolutions must be divisible by 16 (VAE scale 8 x patch size 2). Raw is
 the undistilled training checkpoint and relies on CFG for previews, so a real
 negative prompt, guidance around 3.5, and the full sampling schedule produce
 more representative samples. A LoRA trained on Raw can be used with Turbo.
+
+## Identity Edit v1.2 compatibility
+
+Krea2 edit conditioning has two incompatible contracts. The default
+`ai_toolkit_t0` profile keeps current upstream behavior. To train or continue a
+[`conradlocke/krea2-identity-edit`](https://huggingface.co/conradlocke/krea2-identity-edit)
+v1.2-compatible adapter, opt in explicitly:
+
+```yaml
+model:
+  name_or_path: "krea/Krea-2-Raw"
+  arch: krea2
+  model_kwargs:
+    edit: true
+    edit_profile: identity_edit_v12
+    kv_cache: false
+    vlm_longest_side: 768
+```
+
+That profile uses the recovered Identity Edit contract: bare consecutive Qwen
+vision blocks, clean references before the noisy target, the current target
+timestep for every token span, target-only loss, v1.2 pixel-space FIT, and
+centered stride-1 reference positions. Reference images stay in their supplied
+order; for two-reference training use scene/base first and identity/subject
+second. Keep `full_size_control_images: true` and
+`cache_text_embeddings: false` so FIT and per-example Qwen grounding are not
+bypassed.
+
+The profile deliberately rejects `kv_cache: true`: Identity Edit references use
+the current timestep and full joint attention, so their features are not
+step-invariant. Its official inference-only prompt weights, masks, schedules,
+and `ref_boost` are not part of this trainer.
+
+The public nodes expose the conditioning graph and geometry, but the original
+optimizer, learning rate, stage sizes, and Qwen resize-jitter distribution were
+not published. This implementation therefore uses a deterministic 768-pixel
+longest-side cap by default; override `vlm_longest_side` only as an intentional
+experiment.
 
 ## Prodigy+
 

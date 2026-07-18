@@ -55,6 +55,11 @@ from .src.mmdit import (
 )
 from .src.text_encoder import encode_krea_prompt, SELECT_LAYERS
 from .src.pipeline import Krea2Pipeline, pad_text_features, predict_velocity
+from .src.edit_compat import (
+    IDENTITY_EDIT_V12_PROFILE,
+    fit_reference_image,
+    resolve_edit_profile,
+)
 
 if TYPE_CHECKING:
     from toolkit.data_transfer_object.data_loader import DataLoaderBatchDTO
@@ -228,16 +233,19 @@ class Krea2Model(BaseModel):
         self.use_old_lokr_format = False
 
         # Optional reference-image (edit) conditioning, enabled with
-        # model_kwargs.edit = true. Control images feed the model in two places:
-        # through the Qwen3-VL encoder alongside the prompt (edit-plus style, so
-        # the text embeddings see them) and as clean VAE latents appended to the
-        # image sequence at t=0 (ComfyUI Kontext "index_timestep_zero"). Runs in
-        # ComfyUI with the ComfyUI-Krea2-Ostris-Edit custom nodes. With edit off
-        # (the default) all of it is skipped and this is the plain T2I model.
+        # model_kwargs.edit = true. Control images feed both Qwen3-VL and the
+        # diffusion sequence as clean VAE latents. The default ai_toolkit_t0
+        # profile appends refs at t=0. identity_edit_v12 opts into the recovered
+        # conradlocke Identity Edit contract (bare Qwen vision blocks, fitted
+        # refs before the target, and current-t modulation for every span).
         self.is_edit = bool(self.model_config.model_kwargs.get("edit", False))
+        self.edit_profile = resolve_edit_profile(
+            self.model_config.model_kwargs, self.is_edit
+        )
+        self.identity_edit_compat = self.edit_profile == IDENTITY_EDIT_V12_PROFILE
         self.encode_control_in_text_embeddings = self.is_edit
         self.has_multiple_control_images = self.is_edit
-        # Reference images keep their own aspect/size (not resized to the target).
+        # Raw pixels are required so profile-specific FIT/crop happens before VAE.
         self.use_raw_control_images = self.is_edit
         # model_kwargs.kv_cache = true: train with an asymmetric attention mask
         # where the clean reference tokens attend only to each other (never to
@@ -410,7 +418,7 @@ class Krea2Model(BaseModel):
 
         # tell the model to invert assistant on inference since we want remove lora effects
         self.invert_assistant_lora = True
-    
+
     def get_quantization_exclude_modules(self):
         # sensitive modules kept in full precision (fnmatch patterns on module
         # names within SingleStreamDiT):
@@ -529,7 +537,7 @@ class Krea2Model(BaseModel):
         gen_config.width = int(gen_config.width // sc * sc)
         gen_config.height = int(gen_config.height // sc * sc)
 
-        # Reference image(s) -> clean VAE latents for the t=0 sequence tokens.
+        # Reference image(s) -> clean VAE latents for the edit sequence tokens.
         # The Qwen3-VL side already saw them (baked into the prompt embeds).
         # ctrl_img_1 mirrors ctrl_img when unset, so use one or the other.
         ctrl_paths = []
@@ -551,9 +559,13 @@ class Krea2Model(BaseModel):
             target_pixels = gen_config.width * gen_config.height
             # one batch item (preview batch size is 1) -> List[List[(16, h, w)]]
             ref_latents = [
-                self._encode_ref_latents(ctrl_tensors, target_pixels=target_pixels)
+                self._encode_ref_latents(
+                    ctrl_tensors,
+                    target_pixels=target_pixels,
+                    target_size=(gen_config.height, gen_config.width),
+                )
             ]
-        
+
         # CFG is 0 normalized for this model
         guidance = max(0.0, gen_config.guidance_scale - 1.0)
 
@@ -591,15 +603,18 @@ class Krea2Model(BaseModel):
         return max_pixels
 
     def _encode_ref_latents(
-        self, control_tensors, target_pixels: Optional[int] = None
+        self,
+        control_tensors,
+        target_pixels: Optional[int] = None,
+        target_size: Optional[tuple[int, int]] = None,
     ) -> List[torch.Tensor]:
         """Encode ``[0, 1]`` reference image tensors to VAE latents.
 
-        Returns a list of ``(16, h, w)`` latents (one per reference image). Each
-        control image is resized so its area fits within the pixel budget (see
-        ``_ref_target_pixels``) -- preserving aspect ratio -- then snapped so the
-        latent grid is divisible by the patch size. ``control_tensors`` is a list
-        of ``(C, H, W)`` or ``(1, C, H, W)`` tensors in ``[0, 1]``.
+        Returns a list of ``(16, h, w)`` latents (one per reference image). In
+        the stock profile, each image is area-matched/capped and snapped to the
+        transformer grid. Identity Edit v1.2 instead applies its target-aware FIT
+        geometry in pixel space, before VAE encoding. ``control_tensors`` is a
+        list of ``(C, H, W)`` or ``(1, C, H, W)`` tensors in ``[0, 1]``.
         """
         sc = self.get_bucket_divisibility()  # 16: VAE(8) * patch(2)
         budget = self._ref_target_pixels(target_pixels)
@@ -612,22 +627,30 @@ class Krea2Model(BaseModel):
             img = img.to(self.device_torch, dtype=self.torch_dtype)
 
             h, w = img.shape[2], img.shape[3]
-            # match_target_res: scale area *to* the budget; otherwise only scale
-            # *down* when the image is larger than the budget.
-            area = h * w
-            if match or area > budget:
-                ratio = h / w
-                new_h = math.sqrt(budget * ratio)
-                new_w = new_h / ratio
+            if self.identity_edit_compat:
+                if target_size is None:
+                    raise ValueError(
+                        "identity_edit_v12 reference encoding requires target_size"
+                    )
+                img = fit_reference_image(img.float(), *target_size).to(
+                    self.device_torch, dtype=self.torch_dtype
+                )
             else:
-                new_h, new_w = float(h), float(w)
+                # match_target_res: scale area *to* the budget; otherwise only
+                # scale *down* when the image is larger than the budget.
+                area = h * w
+                if match or area > budget:
+                    ratio = h / w
+                    new_h = math.sqrt(budget * ratio)
+                    new_w = new_h / ratio
+                else:
+                    new_h, new_w = float(h), float(w)
 
-            # snap to a multiple of the bucket divisibility so the VAE latent grid
-            # is patchifiable (the transformer rearranges 2x2 latent patches).
-            new_h = max(sc, int(round(new_h / sc)) * sc)
-            new_w = max(sc, int(round(new_w / sc)) * sc)
-            if (new_h, new_w) != (h, w):
-                img = F.interpolate(img, size=(new_h, new_w), mode="bilinear")
+                # Snap to the VAE(8) * patch(2) grid.
+                new_h = max(sc, int(round(new_h / sc)) * sc)
+                new_w = max(sc, int(round(new_w / sc)) * sc)
+                if (new_h, new_w) != (h, w):
+                    img = F.interpolate(img, size=(new_h, new_w), mode="bilinear")
 
             # encode_images expects [-1, 1]; control tensors arrive in [0, 1].
             latent = self.encode_images(
@@ -641,6 +664,7 @@ class Krea2Model(BaseModel):
         batch: "DataLoaderBatchDTO",
         batch_size: int,
         target_pixels: Optional[int] = None,
+        target_size: Optional[tuple[int, int]] = None,
     ) -> Optional[List[List[torch.Tensor]]]:
         """Build predict_velocity's ``ref_latents`` from a train batch."""
         control_list = batch.control_tensor_list
@@ -651,7 +675,9 @@ class Krea2Model(BaseModel):
         if len(control_list) != batch_size:
             raise ValueError("Control tensor list length does not match batch size")
         return [
-            self._encode_ref_latents(controls, target_pixels=target_pixels)
+            self._encode_ref_latents(
+                controls, target_pixels=target_pixels, target_size=target_size
+            )
             for controls in control_list
         ]
 
@@ -669,8 +695,8 @@ class Krea2Model(BaseModel):
         if self.model.device == torch.device("cpu"):
             self.model.to(self.device_torch)
 
-        # Clean reference latents from the batch's control images (if any); they
-        # ride along in the sequence at t=0 and are never noised.
+        # Clean, never-noised reference latents from the batch's control images.
+        # Their sequence position and timestep modulation are profile-specific.
         ref_latents = None
         if batch is not None and self.is_edit:
             with torch.no_grad():
@@ -679,7 +705,13 @@ class Krea2Model(BaseModel):
                     lw * self.vae_scale_factor
                 )
                 ref_latents = self._batch_ref_latents_from_batch(
-                    batch, latent_model_input.shape[0], target_pixels=target_pixels
+                    batch,
+                    latent_model_input.shape[0],
+                    target_pixels=target_pixels,
+                    target_size=(
+                        lh * self.vae_scale_factor,
+                        lw * self.vae_scale_factor,
+                    ),
                 )
 
         # toolkit timestep (0..1000, 1000 = pure noise) -> Krea flow time t in
@@ -702,38 +734,52 @@ class Krea2Model(BaseModel):
             text_mask,
             ref_latents=ref_latents,
             isolate_refs=self.kv_cache,
+            identity_edit_compat=self.identity_edit_compat,
         )
         return pred
 
     def _prep_vlm_images(self, ctrl: List[torch.Tensor]) -> List[torch.Tensor]:
         """Resize reference images for the Qwen3-VL pass.
 
-        Downscaled (aspect-preserved, never upscaled) to fit ``vlm_max_pixels``
-        total area (384^2 by default, the boogu_image_edit / ComfyUI
-        TextEncodeQwenImageEditPlus budget) -- the MLLM only needs a coarse
-        understanding of the reference; high-res detail flows through the VAE
-        ref latents.
+        Downscaled with preserved aspect ratio and never upscaled. The stock
+        profile fits an area budget (384^2 by default); Identity Edit v1.2 caps
+        the longest side (768 by default). High-resolution appearance still
+        flows through the clean VAE reference tokens.
         """
-        target = int(self.model_config.model_kwargs.get("vlm_max_pixels", 384 * 384))
+        if self.identity_edit_compat:
+            longest_side = int(
+                self.model_config.model_kwargs.get("vlm_longest_side", 768)
+            )
+            if longest_side <= 0:
+                raise ValueError("model_kwargs.vlm_longest_side must be positive")
+        else:
+            target = int(
+                self.model_config.model_kwargs.get("vlm_max_pixels", 384 * 384)
+            )
         images = []
         for img in ctrl:
             if img.dim() == 4:
                 img = img[0]
             img = img.to(self.device_torch)
             h, w = img.shape[1], img.shape[2]
-            scale = min(1.0, math.sqrt(target / (h * w)))
+            if self.identity_edit_compat:
+                scale = min(1.0, longest_side / max(h, w))
+            else:
+                scale = min(1.0, math.sqrt(target / (h * w)))
             nh, nw = max(round(h * scale), 28), max(round(w * scale), 28)
             if (nh, nw) != (h, w):
-                img = (
-                    F.interpolate(
+                if self.identity_edit_compat:
+                    img = F.interpolate(
+                        img.unsqueeze(0).float(), size=(nh, nw), mode="area"
+                    ).squeeze(0)
+                else:
+                    img = F.interpolate(
                         img.unsqueeze(0).float(),
                         size=(nh, nw),
                         mode="bicubic",
                         antialias=True,
-                    )
-                    .squeeze(0)
-                    .clamp(0, 1)
-                )
+                    ).squeeze(0)
+                img = img.clamp(0, 1)
             images.append(img.float())
         return images
 
@@ -783,6 +829,7 @@ class Krea2Model(BaseModel):
                 images=images,
                 vl_processor=self.vl_processor,
                 dtype=self.torch_dtype,
+                bare_image_prompt=self.identity_edit_compat,
             )
             # (L, n, d) -> (L, n*d)
             features = features.reshape(features.shape[0], -1)

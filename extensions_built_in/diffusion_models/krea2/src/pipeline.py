@@ -91,18 +91,31 @@ def prepare(
 
 
 def pack_ref_latents(
-    ref_latents: List[List[torch.Tensor]], patch: int, device, dtype
+    ref_latents: List[List[torch.Tensor]],
+    patch: int,
+    device,
+    dtype,
+    target_hw: Optional[tuple[int, int]] = None,
+    center_positions: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Patchify per-sample reference latents into padded ref tokens / pos / mask.
 
     ``ref_latents`` is a list (one entry per batch item) of lists of ``(C, h, w)``
     reference latents. The i-th reference of a sample is placed on RoPE axis 0 at
-    index ``i + 1`` with its own y/x grid starting at 0 -- the ComfyUI Kontext
-    "index" placement (axis 0 is otherwise always 0, so the base weights see the
-    references as a new "frame" axis). Samples with fewer reference tokens are
-    right-padded and masked out. Returns ``(tokens (B, Lr, C*p*p),
-    pos (B, Lr, 3), mask (B, Lr))``.
+    index ``i + 1``. The stock y/x grid starts at 0 (ComfyUI Kontext "index"
+    placement). With ``center_positions``, Identity Edit v1.2's fitted reference
+    grid is placed at a centered stride-1 offset inside ``target_hw``. Samples
+    with fewer reference tokens are right-padded and masked out. Returns
+    ``(tokens (B, Lr, C*p*p), pos (B, Lr, 3), mask (B, Lr))``.
     """
+    if center_positions and target_hw is None:
+        raise ValueError("target_hw is required when centering reference positions")
+    if target_hw is not None:
+        target_h, target_w = target_hw
+        if target_h % patch or target_w % patch:
+            raise ValueError("target latent dimensions must be divisible by patch")
+        target_grid_h, target_grid_w = target_h // patch, target_w // patch
+
     token_dim = None
     seqs, ids = [], []
     for refs in ref_latents:
@@ -117,8 +130,16 @@ def pack_ref_latents(
             token_dim = toks[-1].shape[-1]
             refids = torch.zeros((h_, w_, 3), device=device)
             refids[..., 0] = i + 1
-            refids[..., 1] = torch.arange(h_, device=device)[:, None]
-            refids[..., 2] = torch.arange(w_, device=device)[None, :]
+            offset_h = offset_w = 0
+            if center_positions:
+                if h_ > target_grid_h or w_ > target_grid_w:
+                    raise ValueError(
+                        "fitted reference grid cannot exceed the target grid"
+                    )
+                offset_h = (target_grid_h - h_) // 2
+                offset_w = (target_grid_w - w_) // 2
+            refids[..., 1] = (torch.arange(h_, device=device) + offset_h)[:, None]
+            refids[..., 2] = (torch.arange(w_, device=device) + offset_w)[None, :]
             rpos.append(refids.reshape(-1, 3))
         seqs.append(toks)
         ids.append(rpos)
@@ -153,15 +174,18 @@ def predict_velocity(
     ref_latents: Optional[List[List[torch.Tensor]]] = None,  # per-sample (C, h, w) refs
     isolate_refs: bool = False,
     ref_kv_cache: Optional[dict] = None,
+    identity_edit_compat: bool = False,
 ) -> torch.Tensor:
-    """Run the MMDiT on the packed [text | image | refs] sequence.
+    """Run the MMDiT on a packed target and optional clean references.
 
     ``latents`` stay in the unpacked ``(B, C, h, w)`` latent layout; image-token
     packing is internal to this function. ``context`` arrives 2D-per-sample
     flattened ``(B, Lt, n*d)`` and is restored to ``(B, Lt, n, d)`` for the MMDiT.
-    ``ref_latents`` (optional) are clean reference latents appended after the
-    image tokens and conditioned at t=0 ("index_timestep_zero"); the prediction
-    only ever covers the noisy target tokens. ``isolate_refs`` restricts ref
+    By default, ``ref_latents`` are appended after the target and conditioned at
+    t=0 (``[text | target | refs]``, "index_timestep_zero"). With
+    ``identity_edit_compat``, fitted references are prepended to the target and
+    all spans use the current timestep (``[text | refs | target]``); only the
+    target output is retained. ``isolate_refs`` restricts stock-profile ref
     tokens to attending only among themselves (see ``SingleStreamDiT.forward``),
     making their per-layer K/V cacheable across steps. ``ref_kv_cache`` is a
     ``{"kv": None, "mask": None}`` dict enabling that cache (inference only,
@@ -175,6 +199,11 @@ def predict_velocity(
     patch = model.config.patch
     b, c, h, w = latents.shape
 
+    if identity_edit_compat and (isolate_refs or ref_kv_cache is not None):
+        raise ValueError(
+            "Identity Edit compatibility requires full joint reference attention "
+            "without reference K/V caching"
+        )
     if ref_kv_cache is not None and not isolate_refs:
         raise ValueError(
             "ref_kv_cache requires isolate_refs: cached ref K/V are only "
@@ -190,18 +219,33 @@ def predict_velocity(
         context.shape[0], context.shape[1], n, context.shape[-1] // n
     )
 
-    img_tokens, pos, mask = prepare(latents, context.shape[1], patch, text_mask)
+    txtlen = context.shape[1]
+    img_tokens, pos, mask = prepare(latents, txtlen, patch, text_mask)
+    target_len = img_tokens.shape[1]
 
     reflen = 0
     ref_mask = None
     if ref_latents is not None and any(len(r) > 0 for r in ref_latents):
         ref_tokens, ref_pos, ref_mask = pack_ref_latents(
-            ref_latents, patch, img_tokens.device, img_tokens.dtype
+            ref_latents,
+            patch,
+            img_tokens.device,
+            img_tokens.dtype,
+            target_hw=(h, w),
+            center_positions=identity_edit_compat,
         )
         reflen = ref_tokens.shape[1]
-        img_tokens = torch.cat((img_tokens, ref_tokens), dim=1)
-        pos = torch.cat((pos, ref_pos), dim=1)
-        mask = torch.cat((mask, ref_mask), dim=1)
+        if identity_edit_compat:
+            # Identity Edit's private/legacy ai-toolkit path used references
+            # before the noisy target. Padded reference slots stay in that span
+            # and are masked, so every batch item shares one target offset.
+            img_tokens = torch.cat((ref_tokens, img_tokens), dim=1)
+            pos = torch.cat((pos[:, :txtlen], ref_pos, pos[:, txtlen:]), dim=1)
+            mask = torch.cat((mask[:, :txtlen], ref_mask, mask[:, txtlen:]), dim=1)
+        else:
+            img_tokens = torch.cat((img_tokens, ref_tokens), dim=1)
+            pos = torch.cat((pos, ref_pos), dim=1)
+            mask = torch.cat((mask, ref_mask), dim=1)
 
     capture = None
     if ref_kv_cache is not None and not reuse_ref_kv and reflen > 0:
@@ -213,7 +257,9 @@ def predict_velocity(
         t=t,
         pos=pos,
         mask=mask,
-        reflen=reflen,
+        # Passing reflen=0 selects one current-t modulation for all spans. The
+        # returned image tokens are sliced below to remove the leading refs.
+        reflen=0 if identity_edit_compat else reflen,
         isolate_refs=isolate_refs,
         ref_kv_capture=capture,
         ref_kv_cache=(ref_kv_cache["kv"], ref_kv_cache["mask"])
@@ -225,7 +271,10 @@ def predict_velocity(
         ref_kv_cache["kv"] = capture
         ref_kv_cache["mask"] = ref_mask
 
-    # (B, imglen, c*p*p) -> (B, c, h, w)
+    if identity_edit_compat and reflen > 0:
+        out = out[:, reflen : reflen + target_len]
+
+    # (B, target_len, c*p*p) -> (B, c, h, w)
     velocity = rearrange(
         out,
         "b (h w) (c ph pw) -> b c (h ph) (w pw)",
@@ -368,6 +417,7 @@ class Krea2Pipeline:
                 ref_latents=ref_latents,
                 isolate_refs=isolate,
                 ref_kv_cache=ref_cache,
+                identity_edit_compat=model.identity_edit_compat,
             )
             if do_cfg:
                 v_uncond = predict_velocity(
@@ -379,6 +429,7 @@ class Krea2Pipeline:
                     ref_latents=ref_latents,
                     isolate_refs=isolate,
                     ref_kv_cache=ref_cache,
+                    identity_edit_compat=model.identity_edit_compat,
                 )
                 v = v_cond + guidance_scale * (v_cond - v_uncond)
             else:

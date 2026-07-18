@@ -36,6 +36,21 @@ PROMPT_TEMPLATE_ENCODE_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n"
 PROMPT_TEMPLATE_ENCODE_START_IDX = 34
 
 
+def build_image_prompt(num_images: int, bare: bool = False) -> str:
+    """Build the reference-image placeholder span for a grounded prompt.
+
+    The stock public edit path labels each image as ``Picture N:``.  Identity
+    Edit was trained with consecutive bare vision blocks instead.
+    """
+
+    if num_images < 0:
+        raise ValueError("num_images must be non-negative")
+    vision = "<|vision_start|><|image_pad|><|vision_end|>"
+    if bare:
+        return vision * num_images
+    return "".join(f"Picture {i + 1}: {vision}" for i in range(num_images))
+
+
 @torch.no_grad()
 def encode_krea_prompt(
     qwen,
@@ -48,6 +63,7 @@ def encode_krea_prompt(
     images: Optional[List[Tensor]] = None,
     vl_processor=None,
     dtype: Optional[torch.dtype] = None,
+    bare_image_prompt: bool = False,
 ) -> Tensor:
     """Encode a single prompt into stacked Qwen3-VL hidden states.
 
@@ -58,11 +74,12 @@ def encode_krea_prompt(
 
     ``images`` (optional) are reference images -- ``(C, H, W)`` tensors in
     ``[0, 1]`` -- embedded in the user message ahead of the prompt via named
-    vision placeholders (``Picture 1: <|vision_start|><|image_pad|><|vision_end|>``,
-    the ComfyUI ``TextEncodeQwenImageEditPlus`` layout). The ``vl_processor``
-    (Qwen3-VL AutoProcessor) expands each ``<|image_pad|>`` to the image's token
-    grid, so the returned features carry the vision tokens as extra conditioning.
-    The system prefix is unchanged, so ``prefix_idx`` slicing stays valid and the
+    vision placeholders. By default these are labeled ``Picture N:`` (the public
+    ai-toolkit / ``TextEncodeQwenImageEditPlus`` layout); ``bare_image_prompt``
+    selects Identity Edit's consecutive unlabelled vision blocks. The
+    ``vl_processor`` expands each ``<|image_pad|>`` to the image's token grid, so
+    the returned features carry the vision tokens as extra conditioning. The
+    system prefix is unchanged, so ``prefix_idx`` slicing stays valid and the
     image + prompt tokens all survive the slice.
     """
     device = qwen.device
@@ -77,10 +94,7 @@ def encode_krea_prompt(
 
     extra_inputs = {}
     if images is not None and len(images) > 0:
-        image_prompt = "".join(
-            f"Picture {i + 1}: <|vision_start|><|image_pad|><|vision_end|>"
-            for i in range(len(images))
-        )
+        image_prompt = build_image_prompt(len(images), bare=bare_image_prompt)
         text = PROMPT_TEMPLATE_ENCODE_PREFIX + image_prompt + prompt
         # No truncation here: the expanded image-pad runs must stay intact.
         inputs = vl_processor(
