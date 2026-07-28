@@ -19,7 +19,7 @@ Accepted config aliases (all map to the same branch): `prodigy_plus`,
 `prodigyplus`, `prodigy_plus_schedulefree`, `prodigyplusschedulefree`,
 `prodigy+`.
 
-## 2. The three rules you must not get wrong
+## 2. The four rules you must not get wrong
 
 1. **`lr: 1.0`.** Prodigy+ adapts the LR internally. The configured `lr` is
    propagated to every parameter group, and Prodigy treats a per-group `lr` as a
@@ -36,6 +36,14 @@ Accepted config aliases (all map to the same branch): `prodigy_plus`,
    average; layering ai-toolkit's EMA on top corrupts the averaged weights during
    save/sample. If `ema_config.use_ema: true` is set with `prodigy_plus`, the
    trainer logs a warning and disables EMA. Leave `use_ema: false`.
+4. **No external gradient clipping.** Prodigy+ estimates its adaptive step size
+   from the gradients. Rescaling them first can interfere with that estimate,
+   including when the optimizer uses its default `use_stableadamw: true`.
+   ai-toolkit therefore skips its external `max_grad_norm` clipping for every
+   Prodigy+ alias while retaining the configured/default `1.0` clipping for
+   AdamW. Do not use `max_grad_norm: 0` as an off switch: it can zero nonzero
+   gradients. On an older unpatched trainer, `max_grad_norm: 1.0e9` is the
+   config-only workaround.
 
 ## 3. Minimal config
 
@@ -103,6 +111,9 @@ forwards `.train()`/`.eval()`, so the toggles work after `accelerator.prepare`.
   parameter-group LRs and calls `optimizer.train()` after construction.
 - `optimizer_requires_eval_mode(optimizer_type)` is the single source of truth
   for whether an optimizer needs eval/train toggling.
+- `optimizer_allows_external_gradient_clipping(optimizer_type)` is the single
+  source of truth for whether `SDTrainer` applies `max_grad_norm`; it returns
+  false for Prodigy+ and Adafactor.
 
 `jobs/process/BaseSDTrainProcess.py`
 - `self._optimizer_is_schedule_free` tracks the lifecycle requirement.
@@ -141,4 +152,6 @@ Dependency: tested `prodigy-plus-schedule-free==2.0.1` in
 When a user asks to "use Prodigy+ in ai-toolkit":
 - set `optimizer: prodigy_plus`, `lr: 1.0`, `lr_scheduler: constant`,
   `ema_config.use_ema: false`;
+- leave `max_grad_norm` alone; the trainer skips external clipping for
+  Prodigy+, while an older unpatched trainer needs `max_grad_norm: 1.0e9`;
 - tune via `optimizer_params.d_coef`, not `lr`.

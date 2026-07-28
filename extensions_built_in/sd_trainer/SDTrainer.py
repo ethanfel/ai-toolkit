@@ -20,6 +20,7 @@ from toolkit.guidance import get_targeted_guidance_loss, get_guidance_loss, Guid
 from toolkit.image_utils import show_tensors, show_latents
 from toolkit.ip_adapter import IPAdapter
 from toolkit.custom_adapter import CustomAdapter
+from toolkit.optimizer import optimizer_allows_external_gradient_clipping
 from toolkit.print import print_acc
 from toolkit.prompt_utils import PromptEmbeds, concat_prompt_embeds
 from toolkit.reference_adapter import ReferenceAdapter
@@ -2144,7 +2145,7 @@ class SDTrainer(BaseSDTrainProcess):
 
         if not self.is_grad_accumulation_step:
             # fix this for multi params
-            if self.train_config.optimizer != 'adafactor':
+            if optimizer_allows_external_gradient_clipping(self.train_config.optimizer):
                 if isinstance(self.params[0], dict):
                     for i in range(len(self.params)):
                         self.accelerator.clip_grad_norm_(self.params[i]['params'], self.train_config.max_grad_norm)

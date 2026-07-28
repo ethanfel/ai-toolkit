@@ -6,6 +6,7 @@ import torch
 from toolkit.optimizer import (
     PRODIGY_PLUS_ALIASES,
     get_optimizer,
+    optimizer_allows_external_gradient_clipping,
     optimizer_requires_eval_mode,
 )
 
@@ -23,6 +24,7 @@ def test_prodigy_plus_aliases_normalize_adam_style_group_lr(alias):
     )
 
     assert optimizer_requires_eval_mode(alias)
+    assert not optimizer_allows_external_gradient_clipping(alias)
     assert optimizer.param_groups[0]["lr"] == pytest.approx(1.0)
     assert optimizer.param_groups[0]["weight_decay"] == pytest.approx(0.01)
 
@@ -117,3 +119,10 @@ def test_prodigy_plus_resume_reconstructs_raw_weights_from_eval_save():
 def test_standard_optimizer_does_not_require_eval_mode():
     assert not optimizer_requires_eval_mode("adamw8bit")
     assert not optimizer_requires_eval_mode(None)
+
+
+def test_external_gradient_clipping_is_kept_for_adamw_but_not_adafactor():
+    assert optimizer_allows_external_gradient_clipping("adamw")
+    assert optimizer_allows_external_gradient_clipping("adamw8bit")
+    assert optimizer_allows_external_gradient_clipping(None)
+    assert not optimizer_allows_external_gradient_clipping("adafactor")

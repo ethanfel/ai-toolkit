@@ -10,6 +10,20 @@ PRODIGY_PLUS_ALIASES = {
 }
 
 
+def optimizer_allows_external_gradient_clipping(optimizer_type: str) -> bool:
+    """Whether the trainer should clip gradients before ``optimizer.step()``.
+
+    Prodigy+ estimates its adaptive step size from the gradients, so externally
+    rescaling them can distort that estimate (including with its default
+    ``use_stableadamw=True``). Adafactor likewise documents that it should not be
+    combined with additional gradient clipping.
+    """
+    if optimizer_type is None:
+        return True
+    lower_type = optimizer_type.lower()
+    return lower_type != "adafactor" and lower_type not in PRODIGY_PLUS_ALIASES
+
+
 def _normalize_prodigy_plus_group_lrs(params, use_lr):
     """Keep explicit parameter-group LRs from defeating Prodigy's relative LR.
 

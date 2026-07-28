@@ -121,9 +121,14 @@ train:
 Prodigy+ adapts its own step size and maintains schedule-free averaged weights.
 The trainer switches to averaged weights for samples and saves, restores train
 weights afterward, and reconstructs them after resume. It also disables a
-second EMA and warns about non-constant schedulers. Selecting Prodigy+ in the UI
-sets the required LR, weight decay, and EMA values; the backend additionally
-normalizes stale Adam-style parameter-group LRs from older jobs.
+second EMA, warns about non-constant schedulers, and skips external gradient
+clipping so it does not distort Prodigy+'s adaptive step-size estimate. AdamW
+runs continue to use the configured `max_grad_norm` (default `1.0`). Do not set
+`max_grad_norm: 0` to disable clipping because that can zero gradients; for an
+older unpatched trainer, use `max_grad_norm: 1.0e9` as the config-only
+workaround. Selecting Prodigy+ in the UI sets the required LR, weight decay, and
+EMA values; the backend additionally normalizes stale Adam-style parameter-group
+LRs from older jobs.
 
 See [`docs/prodigy_plus.md`](prodigy_plus.md) for the detailed optimizer guide.
 
