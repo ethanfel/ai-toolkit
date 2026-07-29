@@ -52,6 +52,10 @@ directory. Existing LoRAs need a separate key-conversion step before reuse.
 - `config/examples/train_lora_krea2_96gb.yaml`: full bf16 for a large-memory GPU.
 - `config/examples/train_lora_krea2_edit_96gb.yaml`: image-edit LoRA training
   with Prodigy+; its comments show both stock and Identity Edit v1.2 profiles.
+- `extensions/krea2_edit/configs/krea2_edit_lora_512.yaml`: the official
+  geometry-matched Identity Edit bulk-stage recipe.
+- `extensions/krea2_edit/configs/krea2_edit_lora_1024_finish.yaml`: the official
+  short 1024px finishing-stage recipe.
 
 Edit the dataset path, output name, captions, and samples, then run:
 
@@ -66,10 +70,46 @@ more representative samples. A LoRA trained on Raw can be used with Turbo.
 
 ## Identity Edit v1.2 compatibility
 
-Krea2 edit conditioning has two incompatible contracts. The default
-`ai_toolkit_t0` profile keeps current upstream behavior. To train or continue a
-[`conradlocke/krea2-identity-edit`](https://huggingface.co/conradlocke/krea2-identity-edit)
-v1.2-compatible adapter, opt in explicitly:
+This fork carries two Identity Edit paths:
+
+1. **`arch: krea2_edit` (recommended for new training)** is the published
+   [`lbouaraba/krea2edit-trainer`](https://github.com/lbouaraba/krea2edit-trainer)
+   extension—the actual training implementation behind the released
+   [`conradlocke/krea2-identity-edit`](https://huggingface.co/conradlocke/krea2-identity-edit)
+   LoRAs. It is geometry-matched to `comfyui-krea2edit` v1.2.4+ and is vendored
+   as a pinned subtree at `extensions/krea2_edit` (source commit `e79de47`).
+2. **`arch: krea2` plus `edit_profile: identity_edit_v12`** preserves this
+   fork's earlier recovered compatibility path. Keep it for existing jobs,
+   checkpoint continuation, and controlled comparisons; it is not the
+   authoritative released-training implementation.
+
+For a new official-path run, start from the supplied 512 config or use:
+
+```yaml
+train:
+  batch_size: 1
+  disable_sampling: true
+  cache_text_embeddings: false
+  noise_scheduler: flowmatch
+  timestep_type: weighted
+model:
+  name_or_path: "krea/Krea-2-Raw"
+  arch: krea2_edit
+  quantize: true
+  quantize_te: true
+  model_kwargs:
+    text_encoder_path: "Qwen/Qwen3-VL-4B-Instruct"
+    fit_refs: true
+```
+
+The official trainer requires raw reference-aware text encoding, forbids flip
+augmentation for edit datasets, supports at most two ordered references, and
+disables in-training edit previews because upstream's inherited preview path
+does not carry the reference tokens. See
+[`extensions/krea2_edit/README.md`](../extensions/krea2_edit/README.md) for the
+dataset layout, measured VRAM, and two-stage recipe.
+
+To continue using the built-in compatibility profile, opt in explicitly:
 
 ```yaml
 model:
@@ -82,7 +122,7 @@ model:
     vlm_longest_side: 768
 ```
 
-That profile uses the recovered Identity Edit contract: bare consecutive Qwen
+The built-in profile uses the recovered Identity Edit contract: bare consecutive Qwen
 vision blocks, clean references before the noisy target, the current target
 timestep for every token span, target-only loss, v1.2 pixel-space FIT, and
 centered stride-1 reference positions. Reference images stay in their supplied
@@ -96,11 +136,10 @@ the current timestep and full joint attention, so their features are not
 step-invariant. Its official inference-only prompt weights, masks, schedules,
 and `ref_boost` are not part of this trainer.
 
-The public nodes expose the conditioning graph and geometry, but the original
-optimizer, learning rate, stage sizes, and Qwen resize-jitter distribution were
-not published. This implementation therefore uses a deterministic 768-pixel
-longest-side cap by default; override `vlm_longest_side` only as an intentional
-experiment.
+The built-in profile uses a deterministic 768-pixel longest-side grounding cap;
+the official extension instead reproduces the released recipe's per-step
+384–768 grounding jitter. Treat switching between the two architecture names as
+a training-contract change, not as a transparent resume.
 
 ## Prodigy+
 

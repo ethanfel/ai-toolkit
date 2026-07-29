@@ -1120,6 +1120,39 @@ export const modelArchs: ModelArch[] = [
     ],
   },
   {
+    name: 'krea2_edit',
+    label: 'Krea 2 Identity Edit (official trainer)',
+    gateUrl: 'https://huggingface.co/krea/Krea-2-Raw',
+    group: 'instruction',
+    defaults: {
+      'config.process[0].model.name_or_path': ['krea/Krea-2-Raw', defaultNameOrPath],
+      'config.process[0].model.quantize': [true, false],
+      'config.process[0].model.quantize_te': [true, false],
+      'config.process[0].train.timestep_type': ['weighted', 'sigmoid'],
+      'config.process[0].train.batch_size': [1, 1],
+      'config.process[0].train.disable_sampling': [true, false],
+      'config.process[0].train.unload_text_encoder': [false, false],
+      'config.process[0].network.conv': [undefined, 16],
+      'config.process[0].network.conv_alpha': [undefined, 16],
+      'config.process[0].model.low_vram': [false, false],
+      'config.process[0].model.model_kwargs': [
+        {
+          text_encoder_path: 'Qwen/Qwen3-VL-4B-Instruct',
+          fit_refs: true,
+        },
+        {},
+      ],
+    },
+    disableSections: [
+      'network.conv', 'train.unload_text_encoder'
+    ],
+    additionalSections: [
+      'datasets.multi_control_paths',
+      'model.low_vram',
+      'model.layer_offloading',
+    ],
+  },
+  {
     name: 'krea2:o_edit',
     label: 'Krea 2 (raw) [Edit Training]',
     gateUrl: 'https://huggingface.co/krea/Krea-2-Raw',
