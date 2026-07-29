@@ -66,5 +66,10 @@ echo "Pod Started"
 
 setup_ssh
 export_env_vars
+# The SQLite database is normally bind-mounted, so the build-time schema push
+# cannot migrate it. Apply additive changes before the worker reads new columns.
+echo "Applying AI Toolkit database schema updates..."
+cd /app/ai-toolkit/ui
+./node_modules/.bin/prisma db push --skip-generate
 echo "Starting AI Toolkit UI..."
-cd /app/ai-toolkit/ui && npm run start 
+exec npm run start
