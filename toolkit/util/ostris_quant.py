@@ -32,6 +32,11 @@ class OstrisQuantizer:
     # get_ostris_quantizer); quantized saves need it to restore the backend
     qtype: Optional[str] = None
 
+    # backends that quantize in the weight's own dtype can set this False to
+    # receive the raw weight tensor in quantize_ instead of a float32 copy,
+    # avoiding a 2x-weight-size allocation during model quantization
+    wants_fp32_weight: bool = True
+
     def can_quantize(self, module: torch.nn.Linear) -> bool:
         """Whether this backend can quantize the given linear (e.g. shape constraints)."""
         return True
@@ -115,20 +120,68 @@ class OstrisLinear(torch.nn.Linear):
         self.ostris_quantizer.requantize_(self, fp_weight)
 
     def _save_to_state_dict(self, destination, prefix, keep_vars):
-        # emit a plain full precision weight so full-model saves need no special casing
-        destination[prefix + "weight"] = self.dequantize_weight()
+        # emit a lazy stand-in instead of the materialized weight: a full-model
+        # state_dict() would otherwise hold every layer's dequantized weight on the
+        # gpu at once (OOM on large models). save loops dequantize per key via
+        # dequantize_if_quantized, mirroring how torchao state dicts are consumed
+        destination[prefix + "weight"] = OstrisLazyWeight(self)
         if self.bias is not None:
             destination[prefix + "bias"] = (
                 self.bias if keep_vars else self.bias.detach()
             )
 
 
+class OstrisLazyWeight(torch.Tensor):
+    """Lazy weight stand-in emitted by OstrisLinear._save_to_state_dict.
+
+    Reports the real shape/dtype/device but holds no data; .dequantize()
+    materializes the full weight from the module's quantized buffers. This is a
+    live view of the module (not a snapshot), which is fine for the save paths
+    state dicts feed: they consume each key once via dequantize_if_quantized.
+    Any other tensor op falls through __torch_dispatch__ and materializes first.
+    """
+
+    @staticmethod
+    def __new__(cls, module: "OstrisLinear"):
+        buf = next(b for b in module._buffers.values() if b is not None)
+        r = torch.Tensor._make_wrapper_subclass(
+            cls,
+            (module.out_features, module.in_features),
+            dtype=module.ostris_orig_dtype,
+            device=buf.device,
+            requires_grad=False,
+        )
+        r._ostris_module = module
+        # routes is_quantized_tensor/dequantize_if_quantized (toolkit/util/quantize.py)
+        r._is_ostris_weight = True
+        return r
+
+    def dequantize(self) -> torch.Tensor:
+        return self._ostris_module.dequantize_weight()
+
+    def __repr__(self):
+        return (
+            f"OstrisLazyWeight(shape={tuple(self.shape)}, dtype={self.dtype}, "
+            f"device={self.device})"
+        )
+
+    @classmethod
+    def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
+        from torch.utils._pytree import tree_map
+
+        def unwrap(t):
+            return t._ostris_module.dequantize_weight() if isinstance(t, cls) else t
+
+        return func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs or {}))
+
+
 def get_ostris_quantizer(qtype: str) -> Optional[OstrisQuantizer]:
     """Resolve a qtype string to a quantizer backend instance, or None if the qtype
     does not belong to a custom backend. Add new backends here."""
+    from toolkit.util.convrot_quant import CONVROT_QTYPES, get_convrot_quantizer
     from toolkit.util.orbit_quant import ORBIT_QTYPES, OrbitQuantizer
     from toolkit.util.orbit_vq_quant import ORBIT_VQ_QTYPES, OrbitVQQuantizer
-    from toolkit.util.convrot_quant import CONVROT_QTYPES, get_convrot_quantizer
+    from toolkit.util.uintx_quant import UINTX_QTYPES, UIntXQuantizer
 
     quantizer = None
     if qtype in ORBIT_QTYPES:
@@ -137,6 +190,8 @@ def get_ostris_quantizer(qtype: str) -> Optional[OstrisQuantizer]:
         quantizer = OrbitVQQuantizer(**ORBIT_VQ_QTYPES[qtype])
     elif qtype in CONVROT_QTYPES:
         quantizer = get_convrot_quantizer(qtype)
+    elif qtype in UINTX_QTYPES:
+        quantizer = UIntXQuantizer(UINTX_QTYPES[qtype])
     if quantizer is not None:
         # quantized saves read this back to restore the backend on load
         quantizer.qtype = qtype
@@ -280,7 +335,10 @@ def convert_linear_to_ostris(
         return False
     if not quantizer.can_quantize(module):
         return False
-    quantizer.quantize_(module, weight.data.to(torch.float32))
+    if quantizer.wants_fp32_weight:
+        quantizer.quantize_(module, weight.data.to(torch.float32))
+    else:
+        quantizer.quantize_(module, weight.data)
     module.ostris_quantizer = quantizer
     module.ostris_orig_dtype = weight.dtype
     del module._parameters["weight"]

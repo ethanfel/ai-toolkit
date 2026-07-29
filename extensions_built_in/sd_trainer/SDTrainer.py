@@ -126,6 +126,11 @@ class SDTrainer(BaseSDTrainProcess):
                 sample_item = self.sample_config.samples[i]
                 prompt = self.sample_config.prompts[i]
 
+                if self.trigger_word is not None:
+                    prompt = self.sd.inject_trigger_into_prompt(
+                        prompt, self.trigger_word, add_if_not_present=False
+                    )
+
                 # needed so we can autoparse the prompt to handle flags
                 gen_img_config = GenerateImageConfig(
                     prompt=prompt, # it will autoparse the prompt
@@ -792,7 +797,10 @@ class SDTrainer(BaseSDTrainProcess):
                         tv = torch.clamp(tv, min=0.001)
                 
                 # step latent, use here or with do_fft_loss
-                t0 = noisy_latents - tv * noise_pred
+                if self.sd.x0_pred:
+                    t0 = noise_pred
+                else:
+                    t0 = noisy_latents - tv * noise_pred
                 
                 if self.train_config.t0_loss_target:
                     # replace the loss targets and pred
