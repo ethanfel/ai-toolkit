@@ -28,7 +28,6 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
     tmux \
     htop \
     nvtop \
-    python3-opencv \
     openssh-client \
     openssh-server \
     openssl \
@@ -65,8 +64,7 @@ WORKDIR /app/ai-toolkit
 
 # Install Python dependencies (only re-runs when the requirements files change)
 COPY requirements.txt requirements_base.txt /app/ai-toolkit/
-RUN pip install --no-cache-dir --break-system-packages -r requirements.txt && \
-    pip install setuptools==69.5.1 --no-cache-dir --break-system-packages
+RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
 
 # Accelerators, matching the manager's linux cu130 spec (manager/spec.py):
 # flash-attn 2.8.3 (prebuilt for torch 2.13 / cu130 / cp312), NATTEN 0.21.7,
