@@ -1,2 +1,2 @@
 -r requirements_base.txt
-scipy==1.12.0
+scipy>=1.14.1  # first version with a cp313 wheel; 1.12.0 builds from source on py3.13
